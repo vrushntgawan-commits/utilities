@@ -39,7 +39,7 @@ const GUILD_ID         = (process.env.GUILD_ID   || '').trim();
 const JSONBIN_KEY      =  process.env.JSONBIN_KEY;
 const BOT_TOKEN        =  process.env.BOT_TOKEN;
 const COIN_EMOJI       = '<:CoinEmoji:1481246827448766526>';
-const ROBUX_EMOJI      = '<:Robux:1479276203537072280>'; // If this shows as :Robux: use 💎 instead
+const ROBUX_EMOJI      = '<:robux:1481247240914731109>'; // If this shows as :Robux: use 💎 instead
 const PREFIX           = 'u!';
 
 // ══════════════════════════════════════════
