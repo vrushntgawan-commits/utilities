@@ -49,6 +49,8 @@ const CODES = {
 };
 
 const pendingVouches = new Map();
+// Active GTN games: Map<channelId, { answer, prize, min, max, active }>
+const activeGTN = new Map();
 
 // ══════════════════════════════════════════
 //  SHOP
@@ -223,7 +225,9 @@ const slashDefs = [
   new SCB().setName('adminhelp').setDescription('View admin commands').setDefaultMemberPermissions(PFB.Administrator),
   new SCB().setName('claims').setDescription('[ADMIN] View all pending claims').setDefaultMemberPermissions(PFB.Administrator),
   new SCB().setName('claimed').setDescription('[ADMIN] Mark a claim as fulfilled').setDefaultMemberPermissions(PFB.Administrator).addStringOption(o=>o.setName('id').setDescription('Claim ID').setRequired(true)),
-  new SCB().setName('deny-claim').setDescription('[ADMIN] Deny a claim and refund to inventory').setDefaultMemberPermissions(PFB.Administrator).addStringOption(o=>o.setName('id').setDescription('Claim ID').setRequired(true)),
+  new SCB().setName('deny-claim').setDescription('[ADMIN] Deny a claim and refund to inventory').setDefaultMemberPermissions(PFB.Administrator)
+    .addStringOption(o=>o.setName('id').setDescription('Claim ID').setRequired(true))
+    .addStringOption(o=>o.setName('reason').setDescription('Reason for denial (optional)').setRequired(false)),
   new SCB().setName('update-robux').setDescription('[ADMIN] Update Robux stock').setDefaultMemberPermissions(PFB.Administrator).addIntegerOption(o=>o.setName('amount').setDescription('New amount').setRequired(true).setMinValue(0)),
   new SCB().setName('update-etfb').setDescription('[ADMIN] Update ETFB stock').setDefaultMemberPermissions(PFB.Administrator).addStringOption(o=>o.setName('type').setDescription('Which item').setRequired(true).addChoices({name:'Divines',value:'divines'},{name:'Celestials',value:'celestials'})).addIntegerOption(o=>o.setName('amount').setDescription('New amount').setRequired(true).setMinValue(0)),
   new SCB().setName('give').setDescription('[ADMIN] Give coins to a user').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target').setRequired(true)).addIntegerOption(o=>o.setName('amount').setDescription('Amount').setRequired(true).setMinValue(1)),
@@ -241,6 +245,11 @@ const slashDefs = [
     .addStringOption(o=>o.setName('description').setDescription('Description shown when redeemed').setRequired(false)),
   new SCB().setName('remove-code').setDescription('[ADMIN] Remove/expire a code immediately').setDefaultMemberPermissions(PFB.Administrator)
     .addStringOption(o=>o.setName('code').setDescription('The code to remove').setRequired(true)),
+  new SCB().setName('gtn').setDescription('[ADMIN] Start a Guess the Number game').setDefaultMemberPermissions(PFB.Administrator)
+    .addIntegerOption(o=>o.setName('min').setDescription('Minimum number').setRequired(true).setMinValue(1))
+    .addIntegerOption(o=>o.setName('max').setDescription('Maximum number').setRequired(true).setMinValue(2))
+    .addIntegerOption(o=>o.setName('number').setDescription('The winning number').setRequired(true))
+    .addIntegerOption(o=>o.setName('prize').setDescription('Coins prize for the winner').setRequired(true).setMinValue(1)),
 ].map(c => c.toJSON());
 
 // ══════════════════════════════════════════
@@ -350,6 +359,58 @@ client.on('messageCreate', async msg => {
       clearTimeout(data.timeout);
       pendingVouches.delete(msg.author.id);
       try { await msg.react('✅'); } catch {}
+      // Edit the admin alert message to show they vouched
+      if (data.alertMsg) {
+        try {
+          await data.alertMsg.edit({ embeds: [new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('✅ Vouch Received!')
+            .setDescription(`<@${msg.author.id}> has now vouched for **${data.itemName}** (\`${data.claimId}\`).
+
+> ${msg.content}`)] });
+        } catch {}
+      }
+    }
+  }
+
+  // GTN check — must happen before spam/coin to avoid counting gtn messages
+  const GTN_CHANNEL_ID = '1480823997498134540';
+  if (msg.channel.id === GTN_CHANNEL_ID && activeGTN.has(GTN_CHANNEL_ID)) {
+    const game = activeGTN.get(GTN_CHANNEL_ID);
+    const guess = parseInt(msg.content.trim());
+    if (!isNaN(guess) && game.active) {
+      if (guess === game.answer) {
+        game.active = false;
+        activeGTN.delete(GTN_CHANNEL_ID);
+        // Give prize
+        const winner = await getUser(msg.author.id, msg.author.username);
+        winner.coins += game.prize;
+        winner.totalEarned = (winner.totalEarned || 0) + game.prize;
+        await saveUser(winner);
+        try {
+          await msg.reply({ embeds: [new EmbedBuilder()
+            .setColor(0xF1C40F)
+            .setTitle('🎉 Correct!')
+            .setDescription(
+              `**${msg.author.username}** guessed the number **${game.answer}**!
+
+` +
+              `You won **${game.prize}** ${COIN_EMOJI}! 🏆
+` +
+              `New balance: **${winner.coins.toLocaleString()}** ${COIN_EMOJI}`
+            )] });
+        } catch {}
+        return;
+      } else if (guess < game.min || guess > game.max) {
+        // Out of range — ignore silently
+      } else {
+        // Wrong but valid — hint
+        try {
+          await msg.reply({ embeds: [new EmbedBuilder()
+            .setColor(0xED4245)
+            .setDescription(`❌ Wrong! The number is **${guess < game.answer ? 'higher' : 'lower'}** than **${guess}**.`)] });
+        } catch {}
+      }
     }
   }
 
@@ -825,10 +886,16 @@ client.on('interactionCreate', async interaction => {
           if (attempt === 3) {
             try {
               const ach = await client.channels.fetch(ALERT_CHANNEL_ID);
-              if (ach) await ach.send({ embeds: [new EmbedBuilder()
-                .setColor(0xED4245)
-                .setTitle('⚠️ Vouch Not Received')
-                .setDescription(`<@${claim.userId}> has not vouched after **3** reminders for **${claim.itemName}** (\`${claimId}\`).`)] });
+              if (ach) {
+                const alertMsg = await ach.send({ embeds: [new EmbedBuilder()
+                  .setColor(0xED4245)
+                  .setTitle('⚠️ Vouch Not Received')
+                  .setDescription(`<@${claim.userId}> has not vouched after **3** reminders for **${claim.itemName}** (\`${claimId}\`).`)] });
+                // Save alert message so we can edit it when they eventually vouch
+                if (pendingVouches.has(claim.userId)) {
+                  pendingVouches.get(claim.userId).alertMsg = alertMsg;
+                }
+              }
             } catch {}
           }
 
@@ -858,6 +925,7 @@ client.on('interactionCreate', async interaction => {
     if (cmd === 'deny-claim') {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const claimId   = interaction.options.getString('id').toUpperCase();
+      const reason    = interaction.options.getString('reason') || null;
       const allClaims = await getClaims();
       const arr       = Array.isArray(allClaims) ? allClaims : [];
       const idx       = arr.findIndex(c => c.claimId === claimId);
@@ -866,6 +934,7 @@ client.on('interactionCreate', async interaction => {
       if (arr[idx].status==='denied')    return interaction.editReply({ embeds: [errEmbed('Already denied.')] });
       const claim = arr[idx];
       arr[idx].status = 'denied'; arr[idx].deniedAt = Date.now(); arr[idx].deniedBy = me.username;
+      if (reason) arr[idx].deniedReason = reason;
       await saveClaims(arr);
       const shopItem = SHOP.find(i => i.id === claim.itemId);
       const u = await getUser(claim.userId, claim.username);
@@ -883,20 +952,65 @@ client.on('interactionCreate', async interaction => {
         await t.send({ embeds: [new EmbedBuilder()
           .setColor(0xED4245)
           .setTitle('❌ Claim Denied')
-          .setDescription(`Your claim \`${claimId}\` for **${claim.itemName}** was denied.\n\nThe item has been returned to your inventory.\nUse \`/claim ${claimId}\` to re-submit.`)] });
+          .setDescription(
+            `Your claim \`${claimId}\` for **${claim.itemName}** was denied.\n\n` +
+            (reason ? `**Reason:** ${reason}\n\n` : '') +
+            `The item has been returned to your inventory.\nUse \`/claim ${claimId}\` to re-submit.`
+          )] });
         dmSent = true;
       } catch {}
       return interaction.editReply({ embeds: [new EmbedBuilder()
         .setColor(0xED4245)
         .setTitle('❌ Claim Denied')
         .addFields(
-          { name: 'Claim',    value: `\`${claimId}\``,       inline: true },
-          { name: 'User',     value: `<@${claim.userId}>`,    inline: true },
-          { name: 'Item',     value: claim.itemName,           inline: true },
-          { name: 'Refunded', value: '✅ Inventory',           inline: true },
-          { name: 'Stock',    value: '✅ Restored',            inline: true },
-          { name: 'DM',       value: dmSent ? '✅ Sent' : '❌ DMs off', inline: true }
+          { name: 'Claim',    value: `\`${claimId}\``,                          inline: true },
+          { name: 'User',     value: `<@${claim.userId}>`,                         inline: true },
+          { name: 'Item',     value: claim.itemName,                                inline: true },
+          { name: 'Reason',   value: reason || 'No reason given',                  inline: false },
+          { name: 'Refunded', value: '✅ Inventory',                               inline: true },
+          { name: 'Stock',    value: '✅ Restored',                                inline: true },
+          { name: 'DM',       value: dmSent ? '✅ Sent' : '❌ DMs off',            inline: true }
         )] });
+    }
+
+    // /gtn
+    if (cmd === 'gtn') {
+      const min    = interaction.options.getInteger('min');
+      const max    = interaction.options.getInteger('max');
+      const answer = interaction.options.getInteger('number');
+      const prize  = interaction.options.getInteger('prize');
+      const GTN_CHANNEL_ID = '1480823997498134540';
+
+      if (answer < min || answer > max)
+        return reply({ embeds: [errEmbed(`The winning number must be between **${min}** and **${max}**!`)] });
+
+      if (activeGTN.has(GTN_CHANNEL_ID))
+        return reply({ embeds: [errEmbed('A GTN game is already running! Wait for it to end.')] });
+
+      activeGTN.set(GTN_CHANNEL_ID, { answer, prize, min, max, active: true });
+
+      try {
+        const gtnCh = await client.channels.fetch(GTN_CHANNEL_ID);
+        if (gtnCh) {
+          await gtnCh.send({ embeds: [new EmbedBuilder()
+            .setColor(0x9B59B6)
+            .setTitle('🎮 Guess the Number!')
+            .setDescription(
+              `A new **Guess the Number** game has started!
+
+` +
+              `Guess a number between **${min}** and **${max}**!
+
+` +
+              `🏆 Prize: **${prize}** ${COIN_EMOJI}
+
+` +
+              `Type your guess in this channel!`
+            )] });
+        }
+      } catch (e) { console.error('GTN channel send error:', e.message); }
+
+      return reply({ embeds: [okEmbed(`GTN game started! Winning number: **${answer}** (between ${min}–${max}). Prize: **${prize}** ${COIN_EMOJI}`)] });
     }
 
     if (cmd === 'give') {
