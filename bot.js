@@ -761,24 +761,21 @@ client.on('interactionCreate', async interaction => {
       const claim = arr[idx];
       arr[idx].status = 'fulfilled'; arr[idx].fulfilledAt = Date.now(); arr[idx].fulfilledBy = me.username;
       await saveClaims(arr);
-      const dmText = claim.category === 'Robux'
-        ? `Your **${claim.itemName}** has been sent! Check your Roblox gamepass.`
-        : `Your **${claim.itemName} (ETFB)** is ready!\n\n**vru4447** has sent you a friend request. Accept it and they'll join your game to deliver!`;
+      // ── DM the user: fulfillment message ──
       let dmSent = false;
       try {
         const t = await client.users.fetch(claim.userId);
+        const fulfillMsg = claim.category === 'Robux'
+          ? `<@${claim.userId}> your claim **${claimId}** for **${claim.itemName}** has been fulfilled by <@${me.id}>! Check your Roblox gamepass!`
+          : `<@${claim.userId}> your claim **${claimId}** for **${claim.itemName}** has been fulfilled by <@${me.id}>!\n\n**vru4447** has sent you a friend request on Roblox. Accept it and they will join your game to deliver your reward!`;
         await t.send({ embeds: [new EmbedBuilder()
           .setColor(0x57F287)
-          .setTitle('🎉 Reward Delivered!')
-          .setDescription(`✅ ${dmText}`)
-          .addFields(
-            { name: 'Claim ID', value: `\`${claimId}\``,    inline: true },
-            { name: 'Item',     value: claim.itemName,       inline: true },
-            { name: 'Roblox',   value: claim.robloxUsername, inline: true }
-          )] });
+          .setTitle('🎉 Claim Fulfilled!')
+          .setDescription(fulfillMsg)] });
         dmSent = true;
       } catch {}
-      // Public channel notification
+
+      // ── Public channel notification ──
       try {
         await interaction.channel.send({ embeds: [new EmbedBuilder()
           .setColor(0x57F287)
@@ -788,41 +785,63 @@ client.on('interactionCreate', async interaction => {
             (claim.category === 'Robux' ? 'Check your Roblox gamepass!' : 'Accept the friend request from **vru4447** on Roblox!')
           )] });
       } catch {}
-      // Vouch request
+
+      // ── Vouch system: DM reminders every hour until they vouch ──
       try {
-        const vch = await client.channels.fetch(VOUCH_CHANNEL_ID);
-        if (vch) {
-          await vch.send({
-            content: `<@${claim.userId}>`,
-            embeds: [new EmbedBuilder()
-              .setColor(0x5865F2)
-              .setTitle('⭐ Please Leave a Vouch!')
+        const t = await client.users.fetch(claim.userId);
+
+        // Send initial vouch DM right away (separate from fulfillment DM)
+        try {
+          await t.send({ embeds: [new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('⭐ Please Leave a Vouch!')
+            .setDescription(
+              `Hey! You just received **${claim.itemName}** 🎉\n\n` +
+              `Please leave a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n` +
+              `**Format:** \`Vouch @${me.username} <your feedback>\`\n\n` +
+              `It only takes a second and helps us a lot! 🙏`
+            )
+            .setFooter({ text: `Claim ${claimId}` })] });
+        } catch {}
+
+        // Recurring hourly DM reminder — never stops until they vouch
+        const sendVouchReminder = async (attempt) => {
+          if (!pendingVouches.has(claim.userId)) return; // already vouched, stop
+          try {
+            const target = await client.users.fetch(claim.userId);
+            await target.send({ embeds: [new EmbedBuilder()
+              .setColor(0xFEE75C)
+              .setTitle('⭐ Reminder: Please Vouch!')
               .setDescription(
-                `Hey <@${claim.userId}>! You got **${claim.itemName}** 🎉\n\n` +
-                `Please vouch so others know we're legit!\n\n` +
-                `**Format:** \`Vouch @${me.username} <reason>\``
+                `Hey! You received **${claim.itemName}** a while ago.\n\n` +
+                `Please drop a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n` +
+                `**Format:** \`Vouch @${me.username} <your feedback>\`\n\n` +
+                `This is reminder **#${attempt}** — we'll keep reminding you until you vouch! 🙏`
               )
-              .setFooter({ text: `Claim ${claimId}` })],
-          });
-          const vt = setTimeout(async () => {
-            pendingVouches.delete(claim.userId);
-            try {
-              const u = await client.users.fetch(claim.userId);
-              await u.send({ embeds: [new EmbedBuilder()
-                .setColor(0xFEE75C)
-                .setTitle("⭐ Don't forget to vouch!")
-                .setDescription(`Head to <#${VOUCH_CHANNEL_ID}> and type:\n\`Vouch @${me.username} <reason>\`\n\nIt only takes a second! 🙏`)] });
-            } catch {}
+              .setFooter({ text: `Claim ${claimId}` })] });
+          } catch {}
+
+          // Alert admins after 3 missed reminders, but keep reminding anyway
+          if (attempt === 3) {
             try {
               const ach = await client.channels.fetch(ALERT_CHANNEL_ID);
               if (ach) await ach.send({ embeds: [new EmbedBuilder()
                 .setColor(0xED4245)
                 .setTitle('⚠️ Vouch Not Received')
-                .setDescription(`<@${claim.userId}> hasn't vouched after receiving **${claim.itemName}** (\`${claimId}\`).`)] });
+                .setDescription(`<@${claim.userId}> has not vouched after **3** reminders for **${claim.itemName}** (\`${claimId}\`).`)] });
             } catch {}
-          }, 10*60*1000);
-          pendingVouches.set(claim.userId, { claimId, itemName: claim.itemName, fulfilledBy: me.username, timeout: vt });
-        }
+          }
+
+          // Schedule next reminder in 1 hour
+          if (pendingVouches.has(claim.userId)) {
+            const nextTimer = setTimeout(() => sendVouchReminder(attempt + 1), 60 * 60 * 1000);
+            pendingVouches.get(claim.userId).timeout = nextTimer;
+          }
+        };
+
+        // First reminder after 1 hour
+        const vt = setTimeout(() => sendVouchReminder(1), 60 * 60 * 1000);
+        pendingVouches.set(claim.userId, { claimId, itemName: claim.itemName, fulfilledBy: me.username, timeout: vt });
       } catch {}
       return interaction.editReply({ embeds: [new EmbedBuilder()
         .setColor(0x57F287)
