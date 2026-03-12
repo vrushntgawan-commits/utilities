@@ -45,9 +45,7 @@ const PREFIX           = 'u!';
 //  CODES
 // ══════════════════════════════════════════
 const CODES = {
-  'RELEASE': { coins: 25, description: '🎉 Launch reward' },
-  'FREE': { coins: 30, description: '🎉 Launch reward' },
-  '150m': { coins: 25, description: '🎉 Launch reward' },
+  
 };
 
 const pendingVouches = new Map();
@@ -232,6 +230,10 @@ const slashDefs = [
   new SCB().setName('take').setDescription('[ADMIN] Take coins from a user').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target').setRequired(true)).addIntegerOption(o=>o.setName('amount').setDescription('Amount').setRequired(true).setMinValue(1)),
   new SCB().setName('remove-inv').setDescription('[ADMIN] Remove an item from a user inventory').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true)).addStringOption(o=>o.setName('claim_id').setDescription('Claim ID to remove').setRequired(true)),
   new SCB().setName('check-inventory').setDescription('[ADMIN] View any user inventory').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true)),
+  new SCB().setName('make-code').setDescription('[ADMIN] Create a one-time code').setDefaultMemberPermissions(PFB.Administrator)
+    .addStringOption(o=>o.setName('code').setDescription('The code word').setRequired(true))
+    .addIntegerOption(o=>o.setName('coins').setDescription('Coins to reward').setRequired(true).setMinValue(1))
+    .addStringOption(o=>o.setName('description').setDescription('Description shown when redeemed').setRequired(false)),
 ].map(c => c.toJSON());
 
 // ══════════════════════════════════════════
@@ -855,6 +857,22 @@ client.on('interactionCreate', async interaction => {
       const t = interaction.options.getUser('user'), amt = interaction.options.getInteger('amount');
       const u = await getUser(t.id, t.username); u.coins = Math.max(0, u.coins-amt); await saveUser(u);
       return reply({ embeds: [okEmbed(`Took **${amt}** ${COIN_EMOJI} from <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)] });
+    }
+    if (cmd === 'make-code') {
+      const code = interaction.options.getString('code').toUpperCase().trim();
+      const coins = interaction.options.getInteger('coins');
+      const desc  = interaction.options.getString('description') || '🎟️ Special code';
+      if (CODES[code]) return reply({ embeds: [errEmbed(`Code \`${code}\` already exists! (gives ${CODES[code].coins} coins)`)] });
+      CODES[code] = { coins, description: desc };
+      return reply({ embeds: [new EmbedBuilder()
+        .setColor(0x57F287)
+        .setTitle('🎟️ Code Created!')
+        .addFields(
+          { name: 'Code',        value: `\`${code}\``,  inline: true },
+          { name: 'Coins',       value: `**${coins}** ${COIN_EMOJI}`, inline: true },
+          { name: 'Description', value: desc,            inline: true }
+        )
+        .setFooter({ text: 'Code is active until the bot restarts. Add it to CODES in bot.js to make it permanent.' })] });
     }
     if (cmd === 'remove-inv') {
       const t       = interaction.options.getUser('user');
