@@ -45,7 +45,7 @@ const PREFIX           = 'u!';
 //  CODES
 // ══════════════════════════════════════════
 const CODES = {
-  
+  'RELEASE': { coins: 25, description: '🎉 Launch reward' },
 };
 
 const pendingVouches = new Map();
@@ -233,6 +233,11 @@ const slashDefs = [
   new SCB().setName('make-code').setDescription('[ADMIN] Create a one-time code').setDefaultMemberPermissions(PFB.Administrator)
     .addStringOption(o=>o.setName('code').setDescription('The code word').setRequired(true))
     .addIntegerOption(o=>o.setName('coins').setDescription('Coins to reward').setRequired(true).setMinValue(1))
+    .addStringOption(o=>o.setName('description').setDescription('Description shown when redeemed').setRequired(false)),
+  new SCB().setName('drop-code').setDescription('[ADMIN] Drop a time-limited code everyone can redeem once').setDefaultMemberPermissions(PFB.Administrator)
+    .addStringOption(o=>o.setName('code').setDescription('The code word').setRequired(true))
+    .addIntegerOption(o=>o.setName('coins').setDescription('Coins to reward').setRequired(true).setMinValue(1))
+    .addIntegerOption(o=>o.setName('minutes').setDescription('How many minutes until the code expires').setRequired(true).setMinValue(1))
     .addStringOption(o=>o.setName('description').setDescription('Description shown when redeemed').setRequired(false)),
 ].map(c => c.toJSON());
 
@@ -445,16 +450,41 @@ async function cmdDaily(reply, userId, username) {
 }
 
 async function cmdUseCode(reply, userId, username, codeInput) {
-  const key = codeInput.toUpperCase().trim(), code = CODES[key];
+  const key  = codeInput.toUpperCase().trim();
+  const code = CODES[key];
   if (!code) return reply({ embeds: [errEmbed(`Code \`${key}\` doesn't exist!`)] });
+
+  // Check expiry
+  if (code.expiresAt && Date.now() > code.expiresAt)
+    return reply({ embeds: [errEmbed(`Code \`${key}\` has expired!`)] });
+
   const u = await getUser(userId, username);
-  if (u.redeemedCodes.includes(key)) return reply({ embeds: [errEmbed(`You've already redeemed \`${key}\`!`)] });
-  u.coins += code.coins; u.totalEarned = (u.totalEarned||0)+code.coins; u.redeemedCodes.push(key);
+
+  // Check if already redeemed by this user
+  const alreadyUsed = code.multiUse
+    ? (code.redeemedBy || []).includes(userId)
+    : u.redeemedCodes.includes(key);
+  if (alreadyUsed) return reply({ embeds: [errEmbed(`You've already redeemed \`${key}\`!`)] });
+
+  // Mark redeemed
+  if (code.multiUse) {
+    code.redeemedBy = code.redeemedBy || [];
+    code.redeemedBy.push(userId);
+  } else {
+    u.redeemedCodes.push(key);
+  }
+
+  u.coins += code.coins; u.totalEarned = (u.totalEarned||0)+code.coins;
   await saveUser(u);
+
+  const expiryLine = code.expiresAt ? `
+Code expires ${ts(code.expiresAt)}` : '';
   return reply({ embeds: [new EmbedBuilder()
     .setColor(0x57F287)
     .setTitle('🎟️ Code Redeemed!')
-    .setDescription(`${code.description}\nYou received **${code.coins}** ${COIN_EMOJI}!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)] });
+    .setDescription(`${code.description}
+You received **${code.coins}** ${COIN_EMOJI}!
+Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}${expiryLine}`)] });
 }
 
 async function cmdShop(reply) {
@@ -873,6 +903,26 @@ client.on('interactionCreate', async interaction => {
           { name: 'Description', value: desc,            inline: true }
         )
         .setFooter({ text: 'Code is active until the bot restarts. Add it to CODES in bot.js to make it permanent.' })] });
+    }
+    if (cmd === 'drop-code') {
+      const code  = interaction.options.getString('code').toUpperCase().trim();
+      const coins = interaction.options.getInteger('coins');
+      const mins  = interaction.options.getInteger('minutes');
+      const desc  = interaction.options.getString('description') || '🎟️ Limited drop';
+      if (CODES[code]) return reply({ embeds: [errEmbed(`Code \`${code}\` already exists!`)] });
+      const expiresAt = Date.now() + mins * 60 * 1000;
+      CODES[code] = { coins, description: desc, expiresAt, multiUse: true, redeemedBy: [] };
+      // Auto-delete when it expires
+      setTimeout(() => { delete CODES[code]; }, mins * 60 * 1000);
+      return reply({ embeds: [new EmbedBuilder()
+        .setColor(0xF1C40F)
+        .setTitle('🎟️ Code Dropped!')
+        .setDescription(`Code \`${code}\` is now live! Expires ${ts(expiresAt)} (${ts(expiresAt, 'T')} your time)`)
+        .addFields(
+          { name: 'Code',    value: `\`${code}\``,              inline: true },
+          { name: 'Coins',   value: `**${coins}** ${COIN_EMOJI}`, inline: true },
+          { name: 'Expires', value: ts(expiresAt),               inline: true }
+        )] });
     }
     if (cmd === 'remove-inv') {
       const t       = interaction.options.getUser('user');
