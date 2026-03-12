@@ -239,6 +239,8 @@ const slashDefs = [
     .addIntegerOption(o=>o.setName('coins').setDescription('Coins to reward').setRequired(true).setMinValue(1))
     .addIntegerOption(o=>o.setName('minutes').setDescription('How many minutes until the code expires').setRequired(true).setMinValue(1))
     .addStringOption(o=>o.setName('description').setDescription('Description shown when redeemed').setRequired(false)),
+  new SCB().setName('remove-code').setDescription('[ADMIN] Remove/expire a code immediately').setDefaultMemberPermissions(PFB.Administrator)
+    .addStringOption(o=>o.setName('code').setDescription('The code to remove').setRequired(true)),
 ].map(c => c.toJSON());
 
 // ══════════════════════════════════════════
@@ -912,16 +914,83 @@ client.on('interactionCreate', async interaction => {
       if (CODES[code]) return reply({ embeds: [errEmbed(`Code \`${code}\` already exists!`)] });
       const expiresAt = Date.now() + mins * 60 * 1000;
       CODES[code] = { coins, description: desc, expiresAt, multiUse: true, redeemedBy: [] };
-      // Auto-delete when it expires
-      setTimeout(() => { delete CODES[code]; }, mins * 60 * 1000);
+
+      // Send announcement to drop channel with @here ping
+      const DROP_CHANNEL_ID = '1481582652430483579';
+      let dropMsg = null;
+      try {
+        const dropCh = await client.channels.fetch(DROP_CHANNEL_ID);
+        if (dropCh) {
+          dropMsg = await dropCh.send({
+            content: '@here',
+            allowedMentions: { parse: ['everyone'] },
+            embeds: [new EmbedBuilder()
+              .setColor(0xF1C40F)
+              .setTitle('🎟️ Code Drop!')
+              .setDescription(
+                `A new code has been dropped!
+
+` +
+                `Use \`/use-code ${code}\` to claim **${coins}** ${COIN_EMOJI}!
+
+` +
+                `⏰ Expires ${ts(expiresAt)} — ${ts(expiresAt, 'T')} your time`
+              )
+              .setFooter({ text: `${desc}` })],
+          });
+        }
+      } catch (e) { console.error('Drop announce error:', e.message); }
+
+      // Auto-expire: delete code + edit the drop message
+      setTimeout(async () => {
+        const redeemCount = (CODES[code]?.redeemedBy || []).length;
+        delete CODES[code];
+        if (dropMsg) {
+          try {
+            await dropMsg.edit({
+              content: '',
+              embeds: [new EmbedBuilder()
+                .setColor(0xED4245)
+                .setTitle('🎟️ Code Expired!')
+                .setDescription(
+                  `The code drop has ended!
+
+` +
+                  `**${redeemCount}** member(s) claimed **${coins}** ${COIN_EMOJI} each.
+
+` +
+                  `Stay active for future drops!`
+                )
+                .setFooter({ text: `Code was active for ${mins} minute(s)` })],
+            });
+          } catch (e) { console.error('Drop expire edit error:', e.message); }
+        }
+      }, mins * 60 * 1000);
+
       return reply({ embeds: [new EmbedBuilder()
         .setColor(0xF1C40F)
         .setTitle('🎟️ Code Dropped!')
-        .setDescription(`Code \`${code}\` is now live! Expires ${ts(expiresAt)} (${ts(expiresAt, 'T')} your time)`)
+        .setDescription(`Code \`${code}\` is now live! Expires ${ts(expiresAt)}`)
         .addFields(
-          { name: 'Code',    value: `\`${code}\``,              inline: true },
+          { name: 'Code',    value: `\`${code}\``,                inline: true },
           { name: 'Coins',   value: `**${coins}** ${COIN_EMOJI}`, inline: true },
-          { name: 'Expires', value: ts(expiresAt),               inline: true }
+          { name: 'Expires', value: ts(expiresAt),                inline: true }
+        )] });
+    }
+    if (cmd === 'remove-code') {
+      const code = interaction.options.getString('code').toUpperCase().trim();
+      if (!CODES[code]) return reply({ embeds: [errEmbed(`Code \`${code}\` doesn't exist!`)] });
+      const { coins, redeemedBy } = CODES[code];
+      const redeemCount = (redeemedBy || []).length;
+      delete CODES[code];
+      return reply({ embeds: [new EmbedBuilder()
+        .setColor(0xED4245)
+        .setTitle('🗑️ Code Removed')
+        .setDescription(`Code \`${code}\` has been removed.`)
+        .addFields(
+          { name: 'Code',      value: `\`${code}\``,                inline: true },
+          { name: 'Redeemed',  value: `${redeemCount} time(s)`,     inline: true },
+          { name: 'Coins/use', value: `**${coins}** ${COIN_EMOJI}`, inline: true }
         )] });
     }
     if (cmd === 'remove-inv') {
