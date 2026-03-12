@@ -46,6 +46,7 @@ const PREFIX           = 'u!';
 // ══════════════════════════════════════════
 const CODES = {
   'RELEASE': { coins: 25, description: '🎉 Launch reward' },
+  'FREE': { coins: 30, description: '🎉 Launch reward' },
 };
 
 const pendingVouches = new Map();
