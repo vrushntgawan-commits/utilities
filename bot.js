@@ -39,6 +39,7 @@ const GUILD_ID         = (process.env.GUILD_ID   || '').trim();
 const JSONBIN_KEY      =  process.env.JSONBIN_KEY;
 const BOT_TOKEN        =  process.env.BOT_TOKEN;
 const COIN_EMOJI       = '<:CoinEmoji:1481246827448766526>';
+const ROBUX_EMOJI      = '<:Robux:1479276203537072280>';
 const PREFIX           = 'u!';
 
 // ══════════════════════════════════════════
@@ -382,35 +383,28 @@ client.on('messageCreate', async msg => {
       if (guess === game.answer) {
         game.active = false;
         activeGTN.delete(GTN_CHANNEL_ID);
-        // Give prize
         const winner = await getUser(msg.author.id, msg.author.username);
         winner.coins += game.prize;
         winner.totalEarned = (winner.totalEarned || 0) + game.prize;
         await saveUser(winner);
         try {
-          await msg.reply({ embeds: [new EmbedBuilder()
+          await msg.channel.send({ embeds: [new EmbedBuilder()
             .setColor(0xF1C40F)
-            .setTitle('🎉 Correct!')
+            .setTitle('🎉 We Have a Winner!')
             .setDescription(
-              `**${msg.author.username}** guessed the number **${game.answer}**!
-
-` +
-              `You won **${game.prize}** ${COIN_EMOJI}! 🏆
-` +
-              `New balance: **${winner.coins.toLocaleString()}** ${COIN_EMOJI}`
-            )] });
+              `<@${msg.author.id}> guessed the number **${game.answer}** correctly! 🏆\n\n` +
+              `**Prize:** **${game.prize}** ${COIN_EMOJI}\n` +
+              `**New balance:** **${winner.coins.toLocaleString()}** ${COIN_EMOJI}`
+            )
+            .setFooter({ text: `Range was ${game.min}–${game.max}` })
+            .setTimestamp()] });
         } catch {}
         return;
-      } else if (guess < game.min || guess > game.max) {
-        // Out of range — ignore silently
-      } else {
-        // Wrong but valid — hint
-        try {
-          await msg.reply({ embeds: [new EmbedBuilder()
-            .setColor(0xED4245)
-            .setDescription(`❌ Wrong! The number is **${guess < game.answer ? 'higher' : 'lower'}** than **${guess}**.`)] });
-        } catch {}
+      } else if (guess >= game.min && guess <= game.max) {
+        // Wrong but in range — just react with ❌, no hint
+        try { await msg.react('❌'); } catch {}
       }
+      // Out of range — ignore silently
     }
   }
 
@@ -552,7 +546,7 @@ Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}${expiryLine}`)] });
 
 async function cmdShop(reply) {
   const robuxLines = SHOP.filter(i => i.category === 'Robux')
-    .map(i => `💎 **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
+    .map(i => `${ROBUX_EMOJI} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
   const etfbLines = SHOP.filter(i => i.category === 'ETFB')
     .map(i => `${i.id==='etfb_cel'?'✨':'🌟'} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
   return reply({ embeds: [new EmbedBuilder()
@@ -987,7 +981,7 @@ client.on('interactionCreate', async interaction => {
       if (activeGTN.has(GTN_CHANNEL_ID))
         return reply({ embeds: [errEmbed('A GTN game is already running! Wait for it to end.')] });
 
-      activeGTN.set(GTN_CHANNEL_ID, { answer, prize, min, max, active: true });
+      activeGTN.set(GTN_CHANNEL_ID, { answer, prize, min, max, active: true, prizeType: 'coins' });
 
       try {
         const gtnCh = await client.channels.fetch(GTN_CHANNEL_ID);
@@ -996,21 +990,26 @@ client.on('interactionCreate', async interaction => {
             .setColor(0x9B59B6)
             .setTitle('🎮 Guess the Number!')
             .setDescription(
-              `A new **Guess the Number** game has started!
-
-` +
-              `Guess a number between **${min}** and **${max}**!
-
-` +
-              `🏆 Prize: **${prize}** ${COIN_EMOJI}
-
-` +
-              `Type your guess in this channel!`
-            )] });
+              `A new game has started! Can you guess the number?\n\n` +
+              `> 🔢 **Range:** ${min} – ${max}\n` +
+              `> 🏆 **Prize:** **${prize}** ${COIN_EMOJI}\n\n` +
+              `Type a number in this channel to guess!\n` +
+              `First correct guess wins! No hints will be given.`
+            )
+            .setFooter({ text: 'Good luck! 🍀' })
+            .setTimestamp()] });
         }
       } catch (e) { console.error('GTN channel send error:', e.message); }
 
-      return reply({ embeds: [okEmbed(`GTN game started! Winning number: **${answer}** (between ${min}–${max}). Prize: **${prize}** ${COIN_EMOJI}`)] });
+      return reply({ embeds: [new EmbedBuilder()
+        .setColor(0x57F287)
+        .setTitle('✅ GTN Game Started!')
+        .addFields(
+          { name: 'Range',  value: `${min} – ${max}`,           inline: true },
+          { name: 'Answer', value: `**${answer}**`,              inline: true },
+          { name: 'Prize',  value: `**${prize}** ${COIN_EMOJI}`, inline: true }
+        )
+        .setFooter({ text: 'Only you can see this' })], flags: MessageFlags.Ephemeral });
     }
 
     if (cmd === 'give') {
