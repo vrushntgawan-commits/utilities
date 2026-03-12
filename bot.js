@@ -39,7 +39,7 @@ const GUILD_ID         = (process.env.GUILD_ID   || '').trim();
 const JSONBIN_KEY      =  process.env.JSONBIN_KEY;
 const BOT_TOKEN        =  process.env.BOT_TOKEN;
 const COIN_EMOJI       = '<:CoinEmoji:1481246827448766526>';
-const ROBUX_EMOJI      = '<:Robux:1479276203537072280>';
+const ROBUX_EMOJI      = '<:Robux:1479276203537072280>'; // If this shows as :Robux: use 💎 instead
 const PREFIX           = 'u!';
 
 // ══════════════════════════════════════════
@@ -342,6 +342,25 @@ client.once('ready', async () => {
     }
   }
 
+  // Resolve custom emojis from the guild so they render correctly
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    await guild.emojis.fetch();
+    const robuxEmoji = guild.emojis.cache.find(e => e.name === 'Robux');
+    const coinEmoji  = guild.emojis.cache.find(e => e.name === 'CoinEmoji');
+    if (robuxEmoji) {
+      module.exports = module.exports || {};
+      global._ROBUX_EMOJI = robuxEmoji.toString(); // e.g. <:Robux:1479276203537072280>
+      console.log(`✅ Robux emoji resolved: ${global._ROBUX_EMOJI}`);
+    } else {
+      console.warn('⚠️ Robux emoji not found in guild — using 💎 fallback');
+    }
+    if (coinEmoji) {
+      global._COIN_EMOJI = coinEmoji.toString();
+      console.log(`✅ Coin emoji resolved: ${global._COIN_EMOJI}`);
+    }
+  } catch (e) { console.error('Emoji resolve error:', e.message); }
+
   try { await dbRead('users'); console.log('✅ Cache warmed'); } catch (e) { console.error('Cache warmup error:', e.message); }
   await updateStockEmbed(client);
   console.log('✅ Ready');
@@ -546,7 +565,7 @@ Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}${expiryLine}`)] });
 
 async function cmdShop(reply) {
   const robuxLines = SHOP.filter(i => i.category === 'Robux')
-    .map(i => `${ROBUX_EMOJI} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
+    .map(i => `💎 **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
   const etfbLines = SHOP.filter(i => i.category === 'ETFB')
     .map(i => `${i.id==='etfb_cel'?'✨':'🌟'} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
   return reply({ embeds: [new EmbedBuilder()
