@@ -1,0 +1,7 @@
+# Copy this to .env and fill in your values
+# Never commit your actual .env to git
+
+BOT_TOKEN=your_bot_token_here
+CLIENT_ID=your_application_id_here
+GUILD_ID=1480823996726640660
+JSONBIN_KEY=your_jsonbin_master_key_here

@@ -1,0 +1,17 @@
+{
+  "name": "discord-economy-bot",
+  "version": "1.0.0",
+  "description": "ETH4N & Vru's economy bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "node-fetch": "^2.7.0",
+    "dotenv": "^16.4.5"
+  }
+}
