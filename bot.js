@@ -274,7 +274,7 @@ async function handleSpamCheck(msg) {
   else { state.lastUserId = uid; state.count = 1; }
   channelLastMsg.set(cid, state);
 
-  if (state.count === 5 && !spamCooldown.has(uid)) {
+  if (state.count === 15 && !spamCooldown.has(uid)) {
     spamCooldown.add(uid);
     setTimeout(() => spamCooldown.delete(uid), 60_000);
 
