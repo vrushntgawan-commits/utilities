@@ -9,9 +9,6 @@ const {
 const fetch = require('node-fetch');
 require('dotenv').config();
 
-// ══════════════════════════════════════════
-//  SAFE FETCH (retry on 429 / network errors)
-// ══════════════════════════════════════════
 async function safeFetch(url, options = {}, retries = 3) {
   try {
     const res = await fetch(url, options);
@@ -29,47 +26,35 @@ async function safeFetch(url, options = {}, retries = 3) {
   }
 }
 
-// ══════════════════════════════════════════
-//  CONFIG
-// ══════════════════════════════════════════
 const STOCK_CHANNEL_ID = '1481026325178220565';
 const VOUCH_CHANNEL_ID = '1481321672970735807';
 const ALERT_CHANNEL_ID = '1480833457604268154';
+const GTN_CHANNEL_ID   = '1480823997498134540';
+const DROP_CHANNEL_ID  = '1481582652430483579';
 const GUILD_ID         = (process.env.GUILD_ID   || '').trim();
 const JSONBIN_KEY      =  process.env.JSONBIN_KEY;
 const BOT_TOKEN        =  process.env.BOT_TOKEN;
 const COIN_EMOJI       = '<:CoinEmoji:1481246827448766526>';
 const ROBUX_EMOJI      = '<:robux:1481247240914731109>';
-const PREFIX               = 'u!';
+const PREFIX           = 'u!';
 
-// ── Moderator role detection ──
-// Any role whose name contains one of these keywords (case-insensitive) counts as a mod
 const MOD_KEYWORDS = ['moderator', 'mod', 'admin', 'staff', 'helper', 'support'];
-
 function isModerator(member) {
   if (!member) return false;
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
-  return member.roles.cache.some(r =>
-    MOD_KEYWORDS.some(kw => r.name.toLowerCase().includes(kw))
-  );
+  return member.roles.cache.some(r => MOD_KEYWORDS.some(kw => r.name.toLowerCase().includes(kw)));
 }
 
-
 // ══════════════════════════════════════════
-//  CODES
+//  HARDCODED PERMANENT CODES (always exist)
 // ══════════════════════════════════════════
-const CODES = {
+const PERMANENT_CODES = {
   'RELEASE': { coins: 25, description: '🎉 Launch reward' },
-  'FIX!': { coins: 10, description: '🎉 Launch reward' },
 };
 
 const pendingVouches = new Map();
-// Active GTN games: Map<channelId, { answer, prize, min, max, active }>
 const activeGTN = new Map();
 
-// ══════════════════════════════════════════
-//  SHOP
-// ══════════════════════════════════════════
 const SHOP = [
   { id: 'robux_25',   name: '25 Robux',   cost: 100,  category: 'Robux', robuxAmt: 25  },
   { id: 'robux_50',   name: '50 Robux',   cost: 200,  category: 'Robux', robuxAmt: 50  },
@@ -87,6 +72,7 @@ const SHOP = [
 
 // ══════════════════════════════════════════
 //  JSONBIN
+//  ⚠️  Create a new bin at jsonbin.io and paste the ID for CODES below
 // ══════════════════════════════════════════
 const BIN_IDS = {
   users:  '69b13ea5c3097a1dd516fe70',
@@ -94,6 +80,7 @@ const BIN_IDS = {
   meta:   '69b13e8fb7ec241ddc5c5aa3',
   claims: '69b13ebbb7ec241ddc5c5b4b',
   warns:  '69b13ebbb7ec241ddc5c5b4c',
+  codes:  '69b3f981b7ec241ddc65e003',
 };
 const DEFAULTS = {
   users:  {},
@@ -101,10 +88,11 @@ const DEFAULTS = {
   meta:   { stockMsgId: null, claimCounter: 0 },
   claims: [],
   warns:  {},
+  codes:  {},
 };
-const cache     = { users: null, store: null, meta: null, claims: null, warns: null };
-const cacheTime = { users: 0,    store: 0,    meta: 0,    claims: 0,    warns: 0    };
-const CACHE_TTL = { users: Infinity, store: 30_000, meta: 30_000, claims: 30_000, warns: 30_000 };
+const cache     = { users: null, store: null, meta: null, claims: null, warns: null, codes: null };
+const cacheTime = { users: 0,    store: 0,    meta: 0,    claims: 0,    warns: 0,    codes: 0    };
+const CACHE_TTL = { users: Infinity, store: 30_000, meta: 30_000, claims: 30_000, warns: 30_000, codes: 60_000 };
 
 async function binRead(name) {
   const res = await safeFetch(`https://api.jsonbin.io/v3/b/${BIN_IDS[name]}/latest`, {
@@ -118,10 +106,8 @@ async function binRead(name) {
 }
 async function binWrite(name, data) {
   let payload = data;
-  if (Array.isArray(data) && data.length === 0)
-    payload = { _empty: true, _data: [] };
-  else if (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0)
-    payload = { _empty: true, _data: {} };
+  if (Array.isArray(data) && data.length === 0) payload = { _empty: true, _data: [] };
+  else if (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0) payload = { _empty: true, _data: {} };
   const res = await safeFetch(`https://api.jsonbin.io/v3/b/${BIN_IDS[name]}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_KEY, 'X-Bin-Versioning': 'false' },
@@ -137,14 +123,52 @@ async function dbRead(name) {
   return cache[name];
 }
 async function dbWrite(name, data) {
-  cache[name] = data;
-  cacheTime[name] = Date.now();
+  cache[name] = data; cacheTime[name] = Date.now();
   await binWrite(name, data);
 }
 
 // ══════════════════════════════════════════
-//  DB HELPERS
+//  CODES HELPERS
+//  Merges permanent hardcoded codes with saved codes from JSONBin
 // ══════════════════════════════════════════
+async function getCodes() {
+  const saved = await dbRead('codes');
+  // Purge expired codes from the bin automatically
+  let dirty = false;
+  for (const [key, code] of Object.entries(saved)) {
+    if (code.expiresAt && Date.now() > code.expiresAt) {
+      delete saved[key];
+      dirty = true;
+    }
+  }
+  if (dirty) await dbWrite('codes', saved);
+  // Merge: saved codes override permanent ones if they share a key (shouldn't happen normally)
+  return { ...PERMANENT_CODES, ...saved };
+}
+
+async function getCode(key) {
+  const all = await getCodes();
+  return all[key.toUpperCase()] || null;
+}
+
+async function saveCode(key, codeObj) {
+  const saved = await dbRead('codes');
+  saved[key.toUpperCase()] = codeObj;
+  await dbWrite('codes', saved);
+}
+
+async function deleteCode(key) {
+  const saved = await dbRead('codes');
+  delete saved[key.toUpperCase()];
+  await dbWrite('codes', saved);
+}
+
+async function codeExists(key) {
+  const all = await getCodes();
+  return key.toUpperCase() in all;
+}
+
+// DB helpers
 async function getUser(userId, username) {
   const users = await dbRead('users');
   if (!users[userId]) {
@@ -155,23 +179,16 @@ async function getUser(userId, username) {
   if (!users[userId].inventory)     users[userId].inventory     = [];
   return users[userId];
 }
-async function saveUser(u) {
-  const users = await dbRead('users');
-  users[u.id] = u;
-  await dbWrite('users', users);
-}
-async function getLeaderboard(n) {
-  const users = await dbRead('users');
-  return Object.values(users).sort((a, b) => b.coins - a.coins).slice(0, n);
-}
+async function saveUser(u) { const users = await dbRead('users'); users[u.id] = u; await dbWrite('users', users); }
+async function getLeaderboard(n) { const users = await dbRead('users'); return Object.values(users).sort((a,b)=>b.coins-a.coins).slice(0,n); }
 async function getStore()    { return dbRead('store'); }
 async function saveStore(s)  { await dbWrite('store', s); }
 async function getMeta()     { return dbRead('meta'); }
 async function saveMeta(m)   { await dbWrite('meta', m); }
 async function getClaims()   { return dbRead('claims'); }
 async function saveClaims(c) { await dbWrite('claims', c); }
-async function getWarns(userId)  { const w = await dbRead('warns'); return w[userId] || []; }
-async function saveWarns(userId, arr) { const w = await dbRead('warns'); w[userId] = arr; await dbWrite('warns', w); }
+async function getWarns(uid) { const w = await dbRead('warns'); return w[uid] || []; }
+async function saveWarns(uid, arr) { const w = await dbRead('warns'); w[uid] = arr; await dbWrite('warns', w); }
 async function nextClaimId() {
   const meta = await getMeta();
   meta.claimCounter = (meta.claimCounter || 0) + 1;
@@ -179,49 +196,35 @@ async function nextClaimId() {
   return `C${meta.claimCounter}`;
 }
 
-// ══════════════════════════════════════════
-//  UTIL
-// ══════════════════════════════════════════
-function fmt(ms) {
-  const s = Math.floor(ms/1000), m = Math.floor(s/60), h = Math.floor(m/60);
-  return h > 0 ? `${h}h ${m%60}m` : m > 0 ? `${m}m ${s%60}s` : `${s}s`;
-}
-function ts(unixMs, style = 'R') { return `<t:${Math.floor(unixMs/1000)}:${style}>`; }
+function fmt(ms) { const s=Math.floor(ms/1000),m=Math.floor(s/60),h=Math.floor(m/60); return h>0?`${h}h ${m%60}m`:m>0?`${m}m ${s%60}s`:`${s}s`; }
+function ts(unixMs, style='R') { return `<t:${Math.floor(unixMs/1000)}:${style}>`; }
 function errEmbed(text) { return new EmbedBuilder().setColor(0xED4245).setDescription(`❌ ${text}`); }
 function okEmbed(text)  { return new EmbedBuilder().setColor(0x57F287).setDescription(`✅ ${text}`); }
 
 function stockEmbed(store) {
-  return new EmbedBuilder()
-    .setTitle('🏪 Current Stock')
-    .setColor(0x5865F2)
+  return new EmbedBuilder().setTitle('🏪 Current Stock').setColor(0x5865F2)
     .setDescription('Use `/shop` to see prices and `/redeem` to purchase!')
     .addFields(
-      { name: '💎 Robux',      value: store.robux      > 0 ? `**${store.robux}** available`       : '❌ Out of stock', inline: true },
-      { name: '✨ Celestials', value: store.celestials > 0 ? `**${store.celestials}x** available`  : '❌ Out of stock', inline: true },
-      { name: '🌟 Divines',   value: store.divines    > 0 ? `**${store.divines}x** available`     : '❌ Out of stock', inline: true }
-    )
-    .setFooter({ text: 'Stock updated by admins' });
+      { name: '💎 Robux',      value: store.robux      > 0 ? `**${store.robux}** available`      : '❌ Out of stock', inline: true },
+      { name: '✨ Celestials', value: store.celestials > 0 ? `**${store.celestials}x** available` : '❌ Out of stock', inline: true },
+      { name: '🌟 Divines',   value: store.divines    > 0 ? `**${store.divines}x** available`    : '❌ Out of stock', inline: true }
+    ).setFooter({ text: 'Stock updated by admins' });
 }
 
 async function updateStockEmbed(clientRef) {
   try {
     const ch = await clientRef.channels.fetch(STOCK_CHANNEL_ID);
     if (!ch) return;
-    const store = await getStore();
-    const embed = stockEmbed(store);
-    const meta  = await getMeta();
+    const store = await getStore(), embed = stockEmbed(store), meta = await getMeta();
     if (meta.stockMsgId) {
       try { const m = await ch.messages.fetch(meta.stockMsgId); await m.edit({ embeds: [embed] }); return; } catch {}
     }
     const sent = await ch.send({ embeds: [embed] });
-    meta.stockMsgId = sent.id;
-    await saveMeta(meta);
+    meta.stockMsgId = sent.id; await saveMeta(meta);
   } catch (e) { console.error('Stock embed error:', e.message); }
 }
 
-// ══════════════════════════════════════════
-//  SLASH COMMAND DEFINITIONS
-// ══════════════════════════════════════════
+// ── Slash command defs ──
 const { SlashCommandBuilder: SCB, PermissionFlagsBits: PFB } = require('discord.js');
 const slashDefs = [
   new SCB().setName('balance').setDescription('Check your coin balance').addUserOption(o=>o.setName('user').setDescription('Check someone else').setRequired(false)),
@@ -253,7 +256,7 @@ const slashDefs = [
   new SCB().setName('take').setDescription('[ADMIN] Take coins from a user').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target').setRequired(true)).addIntegerOption(o=>o.setName('amount').setDescription('Amount').setRequired(true).setMinValue(1)),
   new SCB().setName('remove-inv').setDescription('[ADMIN] Remove an item from a user inventory').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true)).addStringOption(o=>o.setName('claim_id').setDescription('Claim ID to remove').setRequired(true)),
   new SCB().setName('check-inventory').setDescription('[ADMIN] View any user inventory').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true)),
-  new SCB().setName('make-code').setDescription('[ADMIN] Create a one-time code').setDefaultMemberPermissions(PFB.Administrator)
+  new SCB().setName('make-code').setDescription('[ADMIN] Create a permanent saved code').setDefaultMemberPermissions(PFB.Administrator)
     .addStringOption(o=>o.setName('code').setDescription('The code word').setRequired(true))
     .addIntegerOption(o=>o.setName('coins').setDescription('Coins to reward').setRequired(true).setMinValue(1))
     .addStringOption(o=>o.setName('description').setDescription('Description shown when redeemed').setRequired(false)),
@@ -264,6 +267,7 @@ const slashDefs = [
     .addStringOption(o=>o.setName('description').setDescription('Description shown when redeemed').setRequired(false)),
   new SCB().setName('remove-code').setDescription('[ADMIN] Remove/expire a code immediately').setDefaultMemberPermissions(PFB.Administrator)
     .addStringOption(o=>o.setName('code').setDescription('The code to remove').setRequired(true)),
+  new SCB().setName('list-codes').setDescription('[ADMIN] View all active codes').setDefaultMemberPermissions(PFB.Administrator),
   new SCB().setName('gtn').setDescription('[ADMIN] Start a Guess the Number game').setDefaultMemberPermissions(PFB.Administrator)
     .addIntegerOption(o=>o.setName('min').setDescription('Minimum number').setRequired(true).setMinValue(1))
     .addIntegerOption(o=>o.setName('max').setDescription('Maximum number').setRequired(true).setMinValue(2))
@@ -292,9 +296,6 @@ const slashDefs = [
     .addStringOption(o=>o.setName('reason').setDescription('Reason').setRequired(false)),
 ].map(c => c.toJSON());
 
-// ══════════════════════════════════════════
-//  COIN FLUSH (batched write)
-// ══════════════════════════════════════════
 let coinWriteTimer = null;
 function scheduleCoinFlush() {
   if (coinWriteTimer) return;
@@ -306,26 +307,16 @@ function scheduleCoinFlush() {
   }, 5000);
 }
 
-// ══════════════════════════════════════════
-//  CLIENT
-// ══════════════════════════════════════════
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent,
   ],
 });
 
-// ══════════════════════════════════════════
-//  SPAM DETECTION
-//  5 consecutive messages in a channel = penalty
-// ══════════════════════════════════════════
 const channelLastMsg = new Map();
 const spamCooldown   = new Set();
-
 async function handleSpamCheck(msg) {
   const { id: uid, username } = msg.author;
   const cid   = msg.channel.id;
@@ -333,40 +324,19 @@ async function handleSpamCheck(msg) {
   if (state.lastUserId === uid) state.count += 1;
   else { state.lastUserId = uid; state.count = 1; }
   channelLastMsg.set(cid, state);
-
   if (state.count === 15 && !spamCooldown.has(uid)) {
     spamCooldown.add(uid);
     setTimeout(() => spamCooldown.delete(uid), 60_000);
-
-    if (cache.users && cache.users[uid]) {
-      cache.users[uid].coins = Math.max(0, (cache.users[uid].coins || 0) - 100);
-      scheduleCoinFlush();
-    } else {
-      try { const u = await getUser(uid, username); u.coins = Math.max(0, u.coins - 100); await saveUser(u); } catch {}
-    }
-    try {
-      await msg.author.send({ embeds: [new EmbedBuilder()
-        .setColor(0xED4245)
-        .setTitle('⚠️ Spam Warning!')
-        .setDescription(`You were caught spamming in <#${cid}>.\n\n**100** ${COIN_EMOJI} deducted.\n\nPlease stop spamming or you will be penalised again!`)] });
-    } catch {}
-    try {
-      const w = await msg.channel.send({ embeds: [new EmbedBuilder()
-        .setColor(0xED4245)
-        .setDescription(`⚠️ <@${uid}> stop spamming! **100** ${COIN_EMOJI} deducted.`)] });
-      setTimeout(() => w.delete().catch(() => {}), 8000);
-    } catch {}
+    if (cache.users && cache.users[uid]) { cache.users[uid].coins = Math.max(0,(cache.users[uid].coins||0)-100); scheduleCoinFlush(); }
+    else { try { const u=await getUser(uid,username); u.coins=Math.max(0,u.coins-100); await saveUser(u); } catch {} }
+    try { await msg.author.send({ embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⚠️ Spam Warning!').setDescription(`You were caught spamming in <#${cid}>.\n\n**100** ${COIN_EMOJI} deducted.\n\nPlease stop spamming or you will be penalised again!`)] }); } catch {}
+    try { const w=await msg.channel.send({ embeds:[new EmbedBuilder().setColor(0xED4245).setDescription(`⚠️ <@${uid}> stop spamming! **100** ${COIN_EMOJI} deducted.`)] }); setTimeout(()=>w.delete().catch(()=>{}),8000); } catch {}
   }
 }
 
-// ══════════════════════════════════════════
-//  READY
-// ══════════════════════════════════════════
 client.once('ready', async () => {
   console.log(`✅ Bot online: ${client.user.tag}`);
   if (!GUILD_ID || !JSONBIN_KEY) { console.error('FATAL: missing env vars'); process.exit(1); }
-
-  // Register slash commands (requires CLIENT_ID env var = your bot Application ID)
   const CLIENT_ID = (process.env.CLIENT_ID || '').trim();
   if (!CLIENT_ID) {
     console.warn('⚠️  CLIENT_ID not set — skipping slash command registration');
@@ -376,41 +346,20 @@ client.once('ready', async () => {
       const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
       const data = await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: slashDefs });
       console.log(`✅ Registered ${data.length} slash commands`);
-    } catch (e) {
-      console.error('Slash command registration failed:', e.message);
-    }
+    } catch (e) { console.error('Slash command registration failed:', e.message); }
   }
-
-  // Resolve custom emojis from the guild so they render correctly
-  try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    await guild.emojis.fetch();
-    const robuxEmoji = guild.emojis.cache.find(e => e.name === 'Robux');
-    const coinEmoji  = guild.emojis.cache.find(e => e.name === 'CoinEmoji');
-    if (robuxEmoji) {
-      module.exports = module.exports || {};
-      global._ROBUX_EMOJI = robuxEmoji.toString(); // e.g. <:Robux:1479276203537072280>
-      console.log(`✅ Robux emoji resolved: ${global._ROBUX_EMOJI}`);
-    } else {
-      console.warn('⚠️ Robux emoji not found in guild — using 💎 fallback');
-    }
-    if (coinEmoji) {
-      global._COIN_EMOJI = coinEmoji.toString();
-      console.log(`✅ Coin emoji resolved: ${global._COIN_EMOJI}`);
-    }
-  } catch (e) { console.error('Emoji resolve error:', e.message); }
-
   try { await dbRead('users'); console.log('✅ Cache warmed'); } catch (e) { console.error('Cache warmup error:', e.message); }
+  // Warm codes cache & log how many saved codes exist
+  try {
+    const codes = await dbRead('codes');
+    console.log(`✅ Codes bin loaded — ${Object.keys(codes).length} saved code(s)`);
+  } catch (e) { console.error('Codes bin error (did you set the bin ID?):', e.message); }
   await updateStockEmbed(client);
   console.log('✅ Ready');
 });
 
-// ══════════════════════════════════════════
-//  MESSAGE — 1 coin per message + prefix cmds
-// ══════════════════════════════════════════
 client.on('messageCreate', async msg => {
   if (!msg.guild) return;
-  // If a bot talks, reset the spam streak for that channel so it doesn't count against the next human
   if (msg.author.bot) {
     const s = channelLastMsg.get(msg.channel.id);
     if (s) { s.lastUserId = null; s.count = 0; }
@@ -421,79 +370,46 @@ client.on('messageCreate', async msg => {
   if (msg.channel.id === VOUCH_CHANNEL_ID && pendingVouches.has(msg.author.id)) {
     if (/^vouch\s+@\S+\s+.+/i.test(msg.content)) {
       const data = pendingVouches.get(msg.author.id);
-      clearTimeout(data.timeout);
-      pendingVouches.delete(msg.author.id);
+      clearTimeout(data.timeout); pendingVouches.delete(msg.author.id);
       try { await msg.react('✅'); } catch {}
-      // Edit the admin alert message to show they vouched
       if (data.alertMsg) {
-        try {
-          await data.alertMsg.edit({ embeds: [new EmbedBuilder()
-            .setColor(0x57F287)
-            .setTitle('✅ Vouch Received!')
-            .setDescription(`<@${msg.author.id}> has now vouched for **${data.itemName}** (\`${data.claimId}\`).
-
-> ${msg.content}`)] });
-        } catch {}
+        try { await data.alertMsg.edit({ embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Vouch Received!').setDescription(`<@${msg.author.id}> has now vouched for **${data.itemName}** (\`${data.claimId}\`).\n\n> ${msg.content}`)] }); } catch {}
       }
     }
   }
 
-  // GTN check — must happen before spam/coin to avoid counting gtn messages
-  const GTN_CHANNEL_ID = '1480823997498134540';
+  // GTN listener
   if (msg.channel.id === GTN_CHANNEL_ID && activeGTN.has(GTN_CHANNEL_ID)) {
     const game = activeGTN.get(GTN_CHANNEL_ID);
     const guess = parseInt(msg.content.trim());
     if (!isNaN(guess) && game.active) {
       if (guess === game.answer) {
-        game.active = false;
-        activeGTN.delete(GTN_CHANNEL_ID);
+        game.active = false; activeGTN.delete(GTN_CHANNEL_ID);
         const winner = await getUser(msg.author.id, msg.author.username);
-        winner.coins += game.prize;
-        winner.totalEarned = (winner.totalEarned || 0) + game.prize;
+        winner.coins += game.prize; winner.totalEarned = (winner.totalEarned||0)+game.prize;
         await saveUser(winner);
-        try {
-          await msg.channel.send({ embeds: [new EmbedBuilder()
-            .setColor(0xF1C40F)
-            .setTitle('🎉 We Have a Winner!')
-            .setDescription(
-              `<@${msg.author.id}> guessed the number **${game.answer}** correctly! 🏆\n\n` +
-              `**Prize:** **${game.prize}** ${COIN_EMOJI}\n` +
-              `**New balance:** **${winner.coins.toLocaleString()}** ${COIN_EMOJI}`
-            )
-            .setFooter({ text: `Range was ${game.min}–${game.max}` })
-            .setTimestamp()] });
-        } catch {}
+        try { await msg.channel.send({ embeds:[new EmbedBuilder().setColor(0xF1C40F).setTitle('🎉 We Have a Winner!').setDescription(`<@${msg.author.id}> guessed the number **${game.answer}** correctly! 🏆\n\n**Prize:** **${game.prize}** ${COIN_EMOJI}\n**New balance:** **${winner.coins.toLocaleString()}** ${COIN_EMOJI}`).setFooter({text:`Range was ${game.min}–${game.max}`}).setTimestamp()] }); } catch {}
         return;
       } else if (guess >= game.min && guess <= game.max) {
-        // Wrong but in range — just react with ❌, no hint
         try { await msg.react('❌'); } catch {}
       }
-      // Out of range — ignore silently
     }
   }
 
-  // Spam check
   await handleSpamCheck(msg);
 
-  // Coin tracking
   const uid = msg.author.id;
   if (!cache.users) { try { await dbRead('users'); } catch {} }
   if (cache.users) {
-    if (!cache.users[uid]) {
-      cache.users[uid] = { id: uid, username: msg.author.username, coins: 0, totalEarned: 0, lastDaily: null, inventory: [], redeemedCodes: [] };
-    }
+    if (!cache.users[uid]) cache.users[uid] = { id:uid, username:msg.author.username, coins:0, totalEarned:0, lastDaily:null, inventory:[], redeemedCodes:[] };
     cache.users[uid].coins       = (cache.users[uid].coins       || 0) + 1;
     cache.users[uid].totalEarned = (cache.users[uid].totalEarned || 0) + 1;
     cache.users[uid].username    = msg.author.username;
     scheduleCoinFlush();
   } else {
-    getUser(uid, msg.author.username).then(u => {
-      u.coins++;
-      u.totalEarned = (u.totalEarned || 0) + 1;
-      saveUser(u).catch(() => {});
-    }).catch(() => {});
+    getUser(uid, msg.author.username).then(u => { u.coins++; u.totalEarned=(u.totalEarned||0)+1; saveUser(u).catch(()=>{}); }).catch(()=>{});
   }
-  // Prefix commands
+
   if (!msg.content.startsWith(PREFIX)) return;
   const args    = msg.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd     = args.shift().toLowerCase();
@@ -501,42 +417,41 @@ client.on('messageCreate', async msg => {
   const isAdmin = msg.member?.permissions.has(PermissionFlagsBits.Administrator);
 
   try {
-    if (cmd === 'balance' || cmd === 'bal') return await cmdBalance(reply, msg.mentions.users.first() || msg.author);
-    if (cmd === 'daily')                    return await cmdDaily(reply, uid, msg.author.username);
-    if (cmd === 'shop')                     return await cmdShop(reply);
-    if (cmd === 'inventory')                return await cmdInventory(reply, uid, msg.author.username);
-    if (cmd === 'lb' || cmd === 'leaderboard') return await cmdLeaderboard(reply, msg.guild);
-    if (cmd === 'help')                     return await cmdHelp(reply);
-    if (cmd === 'adminhelp' && isAdmin)     return await cmdAdminHelp(reply);
-    if (cmd === 'use-code') {
-      if (!args[0]) return reply({ embeds: [errEmbed(`Usage: \`${PREFIX}use-code <code>\``)] });
+    if (cmd==='balance'||cmd==='bal') return await cmdBalance(reply, msg.mentions.users.first()||msg.author);
+    if (cmd==='daily')                return await cmdDaily(reply, uid, msg.author.username);
+    if (cmd==='shop')                 return await cmdShop(reply);
+    if (cmd==='inventory'||cmd==='inv') return await cmdInventory(reply, uid, msg.author.username);
+    if (cmd==='lb'||cmd==='leaderboard') return await cmdLeaderboard(reply, msg.guild);
+    if (cmd==='help')                 return await cmdHelp(reply);
+    if (cmd==='adminhelp'&&isAdmin)   return await cmdAdminHelp(reply);
+    if (cmd==='use-code') {
+      if (!args[0]) return reply({ embeds:[errEmbed(`Usage: \`${PREFIX}use-code <code>\``)] });
       return await cmdUseCode(reply, uid, msg.author.username, args[0]);
     }
-    if (cmd === 'rain') {
-      if (!isAdmin) return reply({ embeds: [errEmbed('Only admins can use rain!')] });
-      const amt = parseInt(args[0]);
-      if (isNaN(amt) || amt < 10) return reply({ embeds: [errEmbed(`Usage: \`${PREFIX}rain <amount>\` (min 10)`)] });
+    if (cmd==='rain'&&isAdmin) {
+      const amt=parseInt(args[0]);
+      if (isNaN(amt)||amt<10) return reply({ embeds:[errEmbed(`Usage: \`${PREFIX}rain <amount>\` (min 10)`)] });
       return await cmdRain(msg, msg.guild, uid, msg.author.username, amt);
     }
-    if (cmd === 'redeem') {
-      if (!args[0]) return reply({ embeds: [errEmbed(`Usage: \`${PREFIX}redeem <itemId>\``)] });
+    if (cmd==='redeem') {
+      if (!args[0]) return reply({ embeds:[errEmbed(`Usage: \`${PREFIX}redeem <itemId>\``)] });
       return await cmdRedeem(reply, uid, msg.author.username, args[0].toLowerCase());
     }
-    if (cmd === 'give' && isAdmin) {
-      const t = msg.mentions.users.first(), amt = parseInt(args[1]);
-      if (!t || isNaN(amt) || amt < 1) return reply({ embeds: [errEmbed(`Usage: \`${PREFIX}give @user <amount>\``)] });
-      const u = await getUser(t.id, t.username); u.coins += amt; u.totalEarned = (u.totalEarned||0)+amt; await saveUser(u);
-      return reply({ embeds: [okEmbed(`Gave **${amt}** ${COIN_EMOJI} to <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)] });
+    if (cmd==='give'&&isAdmin) {
+      const t=msg.mentions.users.first(), amt=parseInt(args[1]);
+      if (!t||isNaN(amt)||amt<1) return reply({ embeds:[errEmbed(`Usage: \`${PREFIX}give @user <amount>\``)] });
+      const u=await getUser(t.id,t.username); u.coins+=amt; u.totalEarned=(u.totalEarned||0)+amt; await saveUser(u);
+      return reply({ embeds:[okEmbed(`Gave **${amt}** ${COIN_EMOJI} to <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)] });
     }
-    if (cmd === 'take' && isAdmin) {
-      const t = msg.mentions.users.first(), amt = parseInt(args[1]);
-      if (!t || isNaN(amt) || amt < 1) return reply({ embeds: [errEmbed(`Usage: \`${PREFIX}take @user <amount>\``)] });
-      const u = await getUser(t.id, t.username); u.coins = Math.max(0, u.coins - amt); await saveUser(u);
-      return reply({ embeds: [okEmbed(`Took **${amt}** ${COIN_EMOJI} from <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)] });
+    if (cmd==='take'&&isAdmin) {
+      const t=msg.mentions.users.first(), amt=parseInt(args[1]);
+      if (!t||isNaN(amt)||amt<1) return reply({ embeds:[errEmbed(`Usage: \`${PREFIX}take @user <amount>\``)] });
+      const u=await getUser(t.id,t.username); u.coins=Math.max(0,u.coins-amt); await saveUser(u);
+      return reply({ embeds:[okEmbed(`Took **${amt}** ${COIN_EMOJI} from <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)] });
     }
-  } catch (e) {
+  } catch(e) {
     console.error(`Prefix ${cmd}:`, e);
-    reply({ embeds: [errEmbed('Something went wrong!')] }).catch(() => {});
+    reply({ embeds:[errEmbed('Something went wrong!')] }).catch(()=>{});
   }
 });
 
@@ -545,844 +460,443 @@ client.on('messageCreate', async msg => {
 // ══════════════════════════════════════════
 async function cmdBalance(reply, target) {
   const u = await getUser(target.id, target.username);
-  return reply({ embeds: [new EmbedBuilder()
-    .setColor(0xF1C40F)
-    .setAuthor({ name: `${target.username}'s Balance`, iconURL: target.displayAvatarURL() })
-    .setDescription(`## ${COIN_EMOJI} ${u.coins.toLocaleString()} coins`)
-    .setFooter({ text: `Total earned: ${(u.totalEarned||0).toLocaleString()} coins` })] });
+  return reply({ embeds:[new EmbedBuilder().setColor(0xF1C40F).setAuthor({name:`${target.username}'s Balance`,iconURL:target.displayAvatarURL()}).setDescription(`## ${COIN_EMOJI} ${u.coins.toLocaleString()} coins`).setFooter({text:`Total earned: ${(u.totalEarned||0).toLocaleString()} coins`})] });
 }
 
 async function cmdDaily(reply, userId, username) {
-  const u = await getUser(userId, username);
-  const cd = 24*60*60*1000, now = Date.now();
-  if (u.lastDaily && now - u.lastDaily < cd)
-    return reply({ embeds: [errEmbed(`Next daily ready ${ts(u.lastDaily+cd)} (${ts(u.lastDaily+cd,'T')})`)] });
-  const earned = Math.floor(Math.random()*6) + 10; // 10–15
-  u.coins += earned; u.totalEarned = (u.totalEarned||0)+earned; u.lastDaily = now;
+  const u=await getUser(userId,username), cd=24*60*60*1000, now=Date.now();
+  if (u.lastDaily&&now-u.lastDaily<cd)
+    return reply({ embeds:[errEmbed(`Next daily ready ${ts(u.lastDaily+cd)} (${ts(u.lastDaily+cd,'T')})`)] });
+  const earned=Math.floor(Math.random()*6)+10;
+  u.coins+=earned; u.totalEarned=(u.totalEarned||0)+earned; u.lastDaily=now;
   await saveUser(u);
-  const next = now + cd;
-  return reply({ embeds: [new EmbedBuilder()
-    .setColor(0x57F287)
-    .setTitle('🎁 Daily Claimed!')
-    .setDescription(`You received **${earned}** ${COIN_EMOJI}!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)
-    .setFooter({ text: 'Next daily available' })
-    .setTimestamp(next)] });
+  return reply({ embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎁 Daily Claimed!').setDescription(`You received **${earned}** ${COIN_EMOJI}!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`).setFooter({text:'Next daily available'}).setTimestamp(now+cd)] });
 }
 
 async function cmdUseCode(reply, userId, username, codeInput) {
   const key  = codeInput.toUpperCase().trim();
-  const code = CODES[key];
-  if (!code) return reply({ embeds: [errEmbed(`Code \`${key}\` doesn't exist!`)] });
-
-  // Check expiry
+  const code = await getCode(key);
+  if (!code) return reply({ embeds:[errEmbed(`Code \`${key}\` doesn't exist!`)] });
   if (code.expiresAt && Date.now() > code.expiresAt)
-    return reply({ embeds: [errEmbed(`Code \`${key}\` has expired!`)] });
-
+    return reply({ embeds:[errEmbed(`Code \`${key}\` has expired!`)] });
   const u = await getUser(userId, username);
-
-  // Check if already redeemed by this user
   const alreadyUsed = code.multiUse
     ? (code.redeemedBy || []).includes(userId)
     : u.redeemedCodes.includes(key);
-  if (alreadyUsed) return reply({ embeds: [errEmbed(`You've already redeemed \`${key}\`!`)] });
+  if (alreadyUsed) return reply({ embeds:[errEmbed(`You've already redeemed \`${key}\`!`)] });
 
-  // Mark redeemed
+  // Update redemption tracking
   if (code.multiUse) {
     code.redeemedBy = code.redeemedBy || [];
     code.redeemedBy.push(userId);
+    // Save updated redeemedBy back (only for non-permanent codes)
+    if (!(key in PERMANENT_CODES)) await saveCode(key, code);
   } else {
     u.redeemedCodes.push(key);
   }
-
   u.coins += code.coins; u.totalEarned = (u.totalEarned||0)+code.coins;
   await saveUser(u);
-
-  const expiryLine = code.expiresAt ? `
-Code expires ${ts(code.expiresAt)}` : '';
-  return reply({ embeds: [new EmbedBuilder()
-    .setColor(0x57F287)
-    .setTitle('🎟️ Code Redeemed!')
-    .setDescription(`${code.description}
-You received **${code.coins}** ${COIN_EMOJI}!
-Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}${expiryLine}`)] });
+  return reply({ embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎟️ Code Redeemed!').setDescription(`${code.description}\nYou received **${code.coins}** ${COIN_EMOJI}!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}${code.expiresAt?`\nCode expires ${ts(code.expiresAt)}`:''}`)] });
 }
 
 async function cmdShop(reply) {
-  const robuxLines = SHOP.filter(i => i.category === 'Robux')
-    .map(i => `${ROBUX_EMOJI} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
-  const etfbLines = SHOP.filter(i => i.category === 'ETFB')
-    .map(i => `${i.id==='etfb_cel'?'✨':'🌟'} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
-  return reply({ embeds: [new EmbedBuilder()
-    .setTitle('🏪 Rewards Shop')
-    .setColor(0x9B59B6)
-    .addFields(
-      { name: '💎 Robux', value: robuxLines, inline: false },
-      { name: '🎮 ETFB',  value: etfbLines,  inline: false }
-    )
-    .setFooter({ text: 'Buy: /redeem  |  Then: /claim <id>' })] });
+  const robuxLines=SHOP.filter(i=>i.category==='Robux').map(i=>`${ROBUX_EMOJI} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
+  const etfbLines=SHOP.filter(i=>i.category==='ETFB').map(i=>`${i.id==='etfb_cel'?'✨':'🌟'} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
+  return reply({ embeds:[new EmbedBuilder().setTitle('🏪 Rewards Shop').setColor(0x9B59B6).addFields({name:'💎 Robux',value:robuxLines,inline:false},{name:'🎮 ETFB',value:etfbLines,inline:false}).setFooter({text:'Buy: /redeem  |  Then: /claim <id>'})] });
 }
 
 async function cmdInventory(reply, userId, username) {
-  const u = await getUser(userId, username), inv = u.inventory || [];
-  if (!inv.length) return reply({ embeds: [errEmbed('Your inventory is empty! Use `/redeem` to buy items.')] });
-  const list = inv.map(item => {
-    const e = item.category==='Robux' ? '💎' : item.name==='Divine' ? '🌟' : '✨';
-    return `${e} **${item.name}** — \`${item.claimId}\`\n> \`/claim ${item.claimId}\` to submit`;
-  }).join('\n\n');
-  return reply({ embeds: [new EmbedBuilder()
-    .setTitle(`🎒 ${username}'s Inventory`)
-    .setColor(0x9B59B6)
-    .setDescription(list)
-    .setFooter({ text: `${inv.length} item(s) · /claim <id> to submit` })] });
+  const u=await getUser(userId,username), inv=u.inventory||[];
+  if (!inv.length) return reply({ embeds:[errEmbed('Your inventory is empty! Use `/redeem` to buy items.')] });
+  const list=inv.map(item=>{const e=item.category==='Robux'?'💎':item.name==='Divine'?'🌟':'✨'; return `${e} **${item.name}** — \`${item.claimId}\`\n> \`/claim ${item.claimId}\` to submit`;}).join('\n\n');
+  return reply({ embeds:[new EmbedBuilder().setTitle(`🎒 ${username}'s Inventory`).setColor(0x9B59B6).setDescription(list).setFooter({text:`${inv.length} item(s) · /claim <id> to submit`})] });
 }
 
 async function cmdLeaderboard(reply, guild) {
-  const top = await getLeaderboard(50);
-  const medals = ['🥇','🥈','🥉'];
-  const filtered = [];
+  const top=await getLeaderboard(50), medals=['🥇','🥈','🥉'], filtered=[];
   for (const u of top) {
-    if (filtered.length >= 10) break;
-    try {
-      const m = await guild.members.fetch(u.id);
-      if (!m.permissions.has(PermissionFlagsBits.Administrator)) filtered.push(u);
-    } catch {}
+    if (filtered.length>=10) break;
+    try { const m=await guild.members.fetch(u.id); if(!m.permissions.has(PermissionFlagsBits.Administrator)) filtered.push(u); } catch {}
   }
-  const list = filtered.map((u,i) => `${medals[i]||`**${i+1}.**`} <@${u.id}> — **${u.coins.toLocaleString()}** ${COIN_EMOJI}`).join('\n');
-  return reply({ embeds: [new EmbedBuilder().setTitle('🏆 Coin Leaderboard').setColor(0xF1C40F).setDescription(list||'No data yet!')] });
+  const list=filtered.map((u,i)=>`${medals[i]||`**${i+1}.**`} <@${u.id}> — **${u.coins.toLocaleString()}** ${COIN_EMOJI}`).join('\n');
+  return reply({ embeds:[new EmbedBuilder().setTitle('🏆 Coin Leaderboard').setColor(0xF1C40F).setDescription(list||'No data yet!')] });
 }
 
 async function cmdHelp(reply) {
-  return reply({ embeds: [new EmbedBuilder()
-    .setTitle(`📖 Help — Prefix: \`${PREFIX}\``)
-    .setColor(0x5865F2)
-    .addFields(
-      { name: '💰 Economy', value: `\`${PREFIX}balance\` — check your ${COIN_EMOJI}\n\`${PREFIX}daily\` — 10–15 ${COIN_EMOJI} every 24h\n\`${PREFIX}leaderboard\` — top 10\n💬 Every message = 1 ${COIN_EMOJI}`, inline: false },
-      { name: '🛒 Shop',    value: `\`${PREFIX}shop\` — view items & prices\n\`${PREFIX}redeem <id>\` — buy an item\n\`${PREFIX}inventory\` — view your items\n\`/claim <id>\` — submit a delivery claim`, inline: false },
-      { name: '🎟️ Codes',  value: `\`/use-code <code>\` or \`${PREFIX}use-code <code>\``, inline: false }
-    )] });
+  return reply({ embeds:[new EmbedBuilder().setTitle(`📖 Help — Prefix: \`${PREFIX}\``).setColor(0x5865F2).addFields(
+    {name:'💰 Economy',value:`\`${PREFIX}balance\` — check your ${COIN_EMOJI}\n\`${PREFIX}daily\` — 10–15 ${COIN_EMOJI} every 24h\n\`${PREFIX}leaderboard\` — top 10\n💬 Every message = 1 ${COIN_EMOJI}`,inline:false},
+    {name:'🛒 Shop',value:`\`${PREFIX}shop\` — view items & prices\n\`${PREFIX}redeem <id>\` — buy an item\n\`${PREFIX}inventory\` — view your items\n\`/claim <id>\` — submit a delivery claim`,inline:false},
+    {name:'🎟️ Codes',value:`\`/use-code <code>\` or \`${PREFIX}use-code <code>\``,inline:false}
+  )] });
 }
 
 async function cmdAdminHelp(reply) {
-  return reply({ embeds: [new EmbedBuilder()
-    .setTitle('🔒 Admin Commands')
-    .setColor(0xFF6B35)
-    .addFields(
-      { name: '📦 Stock',      value: `/update-robux <amount>\n/update-etfb <type> <amount>`, inline: false },
-      { name: '👥 Coins',      value: `/give @user <amount>\n/take @user <amount>`, inline: false },
-      { name: '🌧️ Rain',     value: `/rain <amount> — 2 min reaction rain`, inline: false },
-      { name: '📋 Claims',    value: `/claims\n/claimed <id>\n/deny-claim <id>`, inline: false },
-      { name: '🎒 Inventory', value: `/check-inventory @user\n/remove-inv @user <id>`, inline: false }
-    )] });
+  return reply({ embeds:[new EmbedBuilder().setTitle('🔒 Admin Commands').setColor(0xFF6B35).addFields(
+    {name:'📦 Stock',value:`/update-robux <amount>\n/update-etfb <type> <amount>`,inline:false},
+    {name:'👥 Coins',value:`/give @user <amount>\n/take @user <amount>`,inline:false},
+    {name:'🌧️ Rain',value:`/rain <amount> — 2 min reaction rain`,inline:false},
+    {name:'📋 Claims',value:`/claims\n/claimed <id>\n/deny-claim <id> [reason]`,inline:false},
+    {name:'🎒 Inventory',value:`/check-inventory @user\n/remove-inv @user <id>`,inline:false},
+    {name:'🎟️ Codes',value:`/make-code — permanent saved code\n/drop-code — time-limited drop\n/remove-code — delete a code\n/list-codes — see all active codes`,inline:false},
+    {name:'🔢 Games',value:`/gtn <min> <max> <number> <prize>`,inline:false},
+    {name:'🛡️ Moderation',value:`/timeout /untimeout /warn /unwarn /warns /kick /ban`,inline:false}
+  )] });
 }
 
 async function cmdRedeem(reply, userId, username, itemId) {
-  const item = SHOP.find(i => i.id === itemId);
-  if (!item) return reply({ embeds: [errEmbed('Unknown item ID. Use `/shop` to see valid IDs.')] });
-  const u = await getUser(userId, username);
-  if (u.coins < item.cost) return reply({ embeds: [errEmbed(`Need **${item.cost}** ${COIN_EMOJI}, you only have **${u.coins}**!`)] });
-  const store = await getStore();
-  if (item.id==='etfb_cel' && store.celestials<=0) return reply({ embeds: [errEmbed('Celestials are out of stock!')] });
-  if (item.id==='etfb_div' && store.divines<=0)    return reply({ embeds: [errEmbed('Divines are out of stock!')] });
-  if (item.category==='Robux' && store.robux<item.robuxAmt) return reply({ embeds: [errEmbed(`Only **${store.robux}** Robux in stock!`)] });
-  if (item.id==='etfb_cel')         store.celestials = Math.max(0, store.celestials-1);
-  else if (item.id==='etfb_div')    store.divines    = Math.max(0, store.divines-1);
-  else                              store.robux      = Math.max(0, store.robux-item.robuxAmt);
-  await saveStore(store);
-  await updateStockEmbed(client);
-  const claimId = await nextClaimId();
-  u.coins -= item.cost;
-  u.inventory.push({ claimId, itemId: item.id, name: item.name, category: item.category, robuxAmt: item.robuxAmt, cost: item.cost });
+  const item=SHOP.find(i=>i.id===itemId);
+  if (!item) return reply({ embeds:[errEmbed('Unknown item ID. Use `/shop` to see valid IDs.')] });
+  const u=await getUser(userId,username);
+  if (u.coins<item.cost) return reply({ embeds:[errEmbed(`Need **${item.cost}** ${COIN_EMOJI}, you only have **${u.coins}**!`)] });
+  const store=await getStore();
+  if (item.id==='etfb_cel'&&store.celestials<=0) return reply({ embeds:[errEmbed('Celestials are out of stock!')] });
+  if (item.id==='etfb_div'&&store.divines<=0)    return reply({ embeds:[errEmbed('Divines are out of stock!')] });
+  if (item.category==='Robux'&&store.robux<item.robuxAmt) return reply({ embeds:[errEmbed(`Only **${store.robux}** Robux in stock!`)] });
+  if (item.id==='etfb_cel')      store.celestials=Math.max(0,store.celestials-1);
+  else if (item.id==='etfb_div') store.divines=Math.max(0,store.divines-1);
+  else                           store.robux=Math.max(0,store.robux-item.robuxAmt);
+  await saveStore(store); await updateStockEmbed(client);
+  const claimId=await nextClaimId();
+  u.coins-=item.cost;
+  u.inventory.push({claimId,itemId:item.id,name:item.name,category:item.category,robuxAmt:item.robuxAmt,cost:item.cost});
   await saveUser(u);
-  return reply({ embeds: [new EmbedBuilder()
-    .setColor(0x57F287)
-    .setTitle('🎒 Added to Inventory!')
-    .setDescription(`**${item.name}** is now in your inventory!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}\n\n📬 Claim ID: \`${claimId}\`\nUse \`/claim ${claimId}\` to submit!`)] });
+  return reply({ embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎒 Added to Inventory!').setDescription(`**${item.name}** is now in your inventory!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}\n\n📬 Claim ID: \`${claimId}\`\nUse \`/claim ${claimId}\` to submit!`)] });
 }
 
 async function cmdRain(msgOrInteraction, guild, senderId, senderName, amount) {
-  const isInt = !!msgOrInteraction.deferReply;
-  const sender = await getUser(senderId, senderName);
-  const errR = t => {
-    const e = errEmbed(t);
-    return isInt ? msgOrInteraction.editReply({ embeds: [e] }) : msgOrInteraction.reply({ embeds: [e] });
-  };
-  if (sender.coins < amount) return errR(`You only have **${sender.coins}** ${COIN_EMOJI}!`);
-  const endsAt = Date.now() + 2*60*1000;
-  const rainEmbed = new EmbedBuilder()
-    .setColor(0x3498DB)
-    .setTitle('🌧️ Coin Rain — React to Enter!')
-    .setDescription(`<@${senderId}> is raining **${amount}** ${COIN_EMOJI}!\n\nReact with 🌧️ to enter!\nCoins split equally.\n\n⏰ Ends ${ts(endsAt)} (${ts(endsAt,'T')} your time)`);
+  const isInt=!!msgOrInteraction.deferReply;
+  const sender=await getUser(senderId,senderName);
+  const errR=t=>{const e=errEmbed(t);return isInt?msgOrInteraction.editReply({embeds:[e]}):msgOrInteraction.reply({embeds:[e]});};
+  if (sender.coins<amount) return errR(`You only have **${sender.coins}** ${COIN_EMOJI}!`);
+  const endsAt=Date.now()+2*60*1000;
+  const rainEmbed=new EmbedBuilder().setColor(0x3498DB).setTitle('🌧️ Coin Rain — React to Enter!').setDescription(`<@${senderId}> is raining **${amount}** ${COIN_EMOJI}!\n\nReact with 🌧️ to enter!\nCoins split equally.\n\n⏰ Ends ${ts(endsAt)} (${ts(endsAt,'T')} your time)`);
   let rainMsg;
-  if (isInt) { await msgOrInteraction.editReply({ embeds: [rainEmbed] }); rainMsg = await msgOrInteraction.fetchReply(); }
-  else rainMsg = await msgOrInteraction.reply({ embeds: [rainEmbed] });
+  if (isInt) { await msgOrInteraction.editReply({embeds:[rainEmbed]}); rainMsg=await msgOrInteraction.fetchReply(); }
+  else rainMsg=await msgOrInteraction.reply({embeds:[rainEmbed]});
   await rainMsg.react('🌧️');
-  setTimeout(async () => {
+  setTimeout(async()=>{
     try {
-      const fresh = await rainMsg.fetch();
-      const reaction = fresh.reactions.cache.get('🌧️');
-      let reactors = [];
-      if (reaction) {
-        const users = await reaction.users.fetch();
-        reactors = [...users.values()].filter(u => !u.bot && u.id !== senderId);
-      }
-      if (!reactors.length) {
-        return rainMsg.reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('🌧️ Rain Ended').setDescription(`Nobody reacted! **${amount}** ${COIN_EMOJI} refunded to <@${senderId}>.`)] });
-      }
-      const per = Math.floor(amount / reactors.length);
-      if (per < 1) {
-        return rainMsg.reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('🌧️ Rain Ended').setDescription(`Too many reactors! **${amount}** ${COIN_EMOJI} refunded to <@${senderId}>.`)] });
-      }
-      const totalGiven = per * reactors.length;
-      const su = await getUser(senderId, senderName);
-      su.coins = Math.max(0, su.coins - totalGiven);
-      await saveUser(su);
-      const names = [];
-      for (const r of reactors) {
-        const u = await getUser(r.id, r.username);
-        u.coins += per; u.totalEarned = (u.totalEarned||0)+per;
-        await saveUser(u);
-        names.push(`<@${r.id}>`);
-      }
-      await rainMsg.reply({ embeds: [new EmbedBuilder()
-        .setColor(0x57F287)
-        .setTitle('🌧️ Rain Finished!')
-        .setDescription(`<@${senderId}> rained **${totalGiven}** ${COIN_EMOJI} across **${reactors.length}** members!\nEach got **${per}** ${COIN_EMOJI}\n\n**Winners:** ${names.join(' ')}`)] });
-    } catch (e) { console.error('Rain end error:', e.message); }
-  }, 2*60*1000);
+      const fresh=await rainMsg.fetch(), reaction=fresh.reactions.cache.get('🌧️');
+      let reactors=[];
+      if (reaction) { const users=await reaction.users.fetch(); reactors=[...users.values()].filter(u=>!u.bot&&u.id!==senderId); }
+      if (!reactors.length) return rainMsg.reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🌧️ Rain Ended').setDescription(`Nobody reacted! **${amount}** ${COIN_EMOJI} refunded to <@${senderId}>.`)]});
+      const per=Math.floor(amount/reactors.length);
+      if (per<1) return rainMsg.reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🌧️ Rain Ended').setDescription(`Too many reactors! **${amount}** ${COIN_EMOJI} refunded to <@${senderId}>.`)]});
+      const totalGiven=per*reactors.length;
+      const su=await getUser(senderId,senderName); su.coins=Math.max(0,su.coins-totalGiven); await saveUser(su);
+      const names=[];
+      for (const r of reactors) { const u=await getUser(r.id,r.username); u.coins+=per; u.totalEarned=(u.totalEarned||0)+per; await saveUser(u); names.push(`<@${r.id}>`); }
+      await rainMsg.reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🌧️ Rain Finished!').setDescription(`<@${senderId}> rained **${totalGiven}** ${COIN_EMOJI} across **${reactors.length}** members!\nEach got **${per}** ${COIN_EMOJI}\n\n**Winners:** ${names.join(' ')}`)]});
+    } catch(e){console.error('Rain end error:',e.message);}
+  },2*60*1000);
 }
 
 // ══════════════════════════════════════════
 //  INTERACTION HANDLER
 // ══════════════════════════════════════════
 client.on('interactionCreate', async interaction => {
-
-  // ── MODAL SUBMIT ──
   if (interaction.isModalSubmit()) {
     if (!interaction.customId.startsWith('claim_modal_')) return;
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const claimId = interaction.customId.replace('claim_modal_', '');
-    const u       = await getUser(interaction.user.id, interaction.user.username);
-    const idx     = (u.inventory||[]).findIndex(i => i.claimId === claimId);
-    if (idx === -1) return interaction.editReply({ embeds: [errEmbed('Item not found in your inventory.')] });
-    const item         = u.inventory[idx];
-    const robloxUser   = interaction.fields.getTextInputValue('roblox_username').trim();
-    const gamepassLink = item.category === 'Robux' ? interaction.fields.getTextInputValue('gamepass_link').trim() : null;
-    const claims = await getClaims(), claimsArr = Array.isArray(claims) ? claims : [];
-    claimsArr.push({
-      claimId,
-      userId:         interaction.user.id,
-      username:       interaction.user.username,
-      itemId:         item.itemId || item.id,
-      itemName:       item.name,
-      category:       item.category,
-      robuxAmt:       item.robuxAmt || 0,
-      robloxUsername: robloxUser,
-      gamepassLink:   gamepassLink || null,
-      claimedAt:      Date.now(),
-      status:         'pending',
-    });
+    await interaction.deferReply({flags:MessageFlags.Ephemeral});
+    const claimId=interaction.customId.replace('claim_modal_','');
+    const u=await getUser(interaction.user.id,interaction.user.username);
+    const idx=(u.inventory||[]).findIndex(i=>i.claimId===claimId);
+    if (idx===-1) return interaction.editReply({embeds:[errEmbed('Item not found in your inventory.')]});
+    const item=u.inventory[idx];
+    const robloxUser=interaction.fields.getTextInputValue('roblox_username').trim();
+    const gamepassLink=item.category==='Robux'?interaction.fields.getTextInputValue('gamepass_link').trim():null;
+    const claims=await getClaims(), claimsArr=Array.isArray(claims)?claims:[];
+    claimsArr.push({claimId,userId:interaction.user.id,username:interaction.user.username,itemId:item.itemId||item.id,itemName:item.name,category:item.category,robuxAmt:item.robuxAmt||0,robloxUsername:robloxUser,gamepassLink:gamepassLink||null,claimedAt:Date.now(),status:'pending'});
     await saveClaims(claimsArr);
-    u.inventory.splice(idx, 1);
-    await saveUser(u);
-    return interaction.editReply({ embeds: [new EmbedBuilder()
-      .setColor(0x57F287)
-      .setTitle('📬 Claim Submitted!')
-      .setDescription(
-        `Your claim for **${item.name}** has been submitted!\n\n` +
-        `**Claim ID:** \`${claimId}\`\n` +
-        `**Roblox:** \`${robloxUser}\`\n` +
-        (gamepassLink ? `**Gamepass:** ${gamepassLink}\n` : '') +
-        `\nAn admin will process this shortly!`
-      )] });
+    u.inventory.splice(idx,1); await saveUser(u);
+    return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('📬 Claim Submitted!').setDescription(`Your claim for **${item.name}** has been submitted!\n\n**Claim ID:** \`${claimId}\`\n**Roblox:** \`${robloxUser}\`\n${gamepassLink?`**Gamepass:** ${gamepassLink}\n`:''}\nAn admin will process this shortly!`)]});
   }
 
   if (!interaction.isChatInputCommand()) return;
-  const cmd   = interaction.commandName;
-  const me    = interaction.user;
-  const reply = p => interaction.reply(p);
+  const cmd=interaction.commandName, me=interaction.user, reply=p=>interaction.reply(p);
 
   try {
-    if (cmd === 'balance')     return await cmdBalance(reply, interaction.options.getUser('user') || me);
-    if (cmd === 'daily')       return await cmdDaily(reply, me.id, me.username);
-    if (cmd === 'shop')        return await cmdShop(reply);
-    if (cmd === 'inventory')   return await cmdInventory(reply, me.id, me.username);
-    if (cmd === 'leaderboard') return await cmdLeaderboard(reply, interaction.guild);
-    if (cmd === 'help')        return await cmdHelp(reply);
-    if (cmd === 'adminhelp')   return await cmdAdminHelp(reply);
-    if (cmd === 'use-code')    return await cmdUseCode(reply, me.id, me.username, interaction.options.getString('code'));
+    if (cmd==='balance')     return await cmdBalance(reply, interaction.options.getUser('user')||me);
+    if (cmd==='daily')       return await cmdDaily(reply, me.id, me.username);
+    if (cmd==='shop')        return await cmdShop(reply);
+    if (cmd==='inventory')   return await cmdInventory(reply, me.id, me.username);
+    if (cmd==='leaderboard') return await cmdLeaderboard(reply, interaction.guild);
+    if (cmd==='help')        return await cmdHelp(reply);
+    if (cmd==='adminhelp')   return await cmdAdminHelp(reply);
+    if (cmd==='use-code')    return await cmdUseCode(reply, me.id, me.username, interaction.options.getString('code'));
+    if (cmd==='rain') { await interaction.deferReply(); return await cmdRain(interaction, interaction.guild, me.id, me.username, interaction.options.getInteger('amount')); }
+    if (cmd==='redeem') { await interaction.deferReply(); return await cmdRedeem(p=>interaction.editReply(p), me.id, me.username, interaction.options.getString('item')); }
 
-    if (cmd === 'rain') {
-      await interaction.deferReply();
-      return await cmdRain(interaction, interaction.guild, me.id, me.username, interaction.options.getInteger('amount'));
-    }
-    if (cmd === 'redeem') {
-      await interaction.deferReply();
-      return await cmdRedeem(p => interaction.editReply(p), me.id, me.username, interaction.options.getString('item'));
-    }
-
-    // /claim — show modal
-    if (cmd === 'claim') {
-      const idArg = interaction.options.getString('id').toUpperCase();
-      const u     = await getUser(me.id, me.username);
-      const item  = (u.inventory||[]).find(i => i.claimId === idArg);
-      if (!item) return reply({ embeds: [errEmbed(`No item \`${idArg}\` in your inventory.`)], flags: MessageFlags.Ephemeral });
-      const modal = new ModalBuilder().setCustomId(`claim_modal_${item.claimId}`).setTitle(`Claim: ${item.name}`);
-      modal.addComponents(new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('roblox_username').setLabel('Your Roblox Username')
-          .setStyle(TextInputStyle.Short).setPlaceholder('e.g. Builderman').setRequired(true)
-      ));
-      if (item.category === 'Robux') {
-        modal.addComponents(new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('gamepass_link')
-            .setLabel(`Gamepass Link (set price to ${item.robuxAmt||0} Robux)`)
-            .setStyle(TextInputStyle.Short).setPlaceholder('https://www.roblox.com/game-pass/...').setRequired(true)
-        ));
-      }
+    if (cmd==='claim') {
+      const idArg=interaction.options.getString('id').toUpperCase();
+      const u=await getUser(me.id,me.username), item=(u.inventory||[]).find(i=>i.claimId===idArg);
+      if (!item) return reply({embeds:[errEmbed(`No item \`${idArg}\` in your inventory.`)],flags:MessageFlags.Ephemeral});
+      const modal=new ModalBuilder().setCustomId(`claim_modal_${item.claimId}`).setTitle(`Claim: ${item.name}`);
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('roblox_username').setLabel('Your Roblox Username').setStyle(TextInputStyle.Short).setPlaceholder('e.g. Builderman').setRequired(true)));
+      if (item.category==='Robux') modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('gamepass_link').setLabel(`Gamepass Link (set price to ${item.robuxAmt||0} Robux)`).setStyle(TextInputStyle.Short).setPlaceholder('https://www.roblox.com/game-pass/...').setRequired(true)));
       return interaction.showModal(modal);
     }
 
-    // /claims
-    if (cmd === 'claims') {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const allClaims = await getClaims();
-      const pending   = (Array.isArray(allClaims) ? allClaims : []).filter(c => c.status === 'pending');
-      if (!pending.length) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x57F287).setDescription('✅ No pending claims!')] });
-      const fields = pending.map(c => ({
-        name:  `${c.claimId} — ${c.itemName}`,
-        value: `👤 **${c.username}** · Roblox: \`${c.robloxUsername}\`\n${c.gamepassLink ? `🔗 ${c.gamepassLink}\n` : ''}📅 ${ts(c.claimedAt,'R')}`,
-        inline: false,
-      }));
-      const chunks = [];
-      for (let i = 0; i < fields.length; i += 10) chunks.push(fields.slice(i, i+10));
-      for (let i = 0; i < chunks.length; i++) {
-        const e = new EmbedBuilder()
-          .setColor(0xF1C40F)
-          .setTitle(i === 0 ? `📋 Pending Claims — ${pending.length} total` : '📋 (continued)')
-          .addFields(chunks[i])
-          .setFooter({ text: '/claimed <id>  ·  /deny-claim <id>' });
-        if (i === 0) await interaction.editReply({ embeds: [e] });
-        else         await interaction.followUp({ embeds: [e], flags: MessageFlags.Ephemeral });
+    if (cmd==='claims') {
+      await interaction.deferReply({flags:MessageFlags.Ephemeral});
+      const allClaims=await getClaims(), pending=(Array.isArray(allClaims)?allClaims:[]).filter(c=>c.status==='pending');
+      if (!pending.length) return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setDescription('✅ No pending claims!')]});
+      const fields=pending.map(c=>({name:`${c.claimId} — ${c.itemName}`,value:`👤 **${c.username}** · Roblox: \`${c.robloxUsername}\`\n${c.gamepassLink?`🔗 ${c.gamepassLink}\n`:''}📅 ${ts(c.claimedAt,'R')}`,inline:false}));
+      const chunks=[]; for(let i=0;i<fields.length;i+=10) chunks.push(fields.slice(i,i+10));
+      for(let i=0;i<chunks.length;i++){
+        const e=new EmbedBuilder().setColor(0xF1C40F).setTitle(i===0?`📋 Pending Claims — ${pending.length} total`:'📋 (continued)').addFields(chunks[i]).setFooter({text:'/claimed <id>  ·  /deny-claim <id> [reason]'});
+        if(i===0) await interaction.editReply({embeds:[e]}); else await interaction.followUp({embeds:[e],flags:MessageFlags.Ephemeral});
       }
       return;
     }
 
-    // /claimed
-    if (cmd === 'claimed') {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const claimId   = interaction.options.getString('id').toUpperCase();
-      const allClaims = await getClaims();
-      const arr       = Array.isArray(allClaims) ? allClaims : [];
-      const idx       = arr.findIndex(c => c.claimId === claimId);
-      if (idx === -1)                    return interaction.editReply({ embeds: [errEmbed(`Claim \`${claimId}\` not found.`)] });
-      if (arr[idx].status==='fulfilled') return interaction.editReply({ embeds: [errEmbed('Already fulfilled.')] });
-      if (arr[idx].status==='denied')    return interaction.editReply({ embeds: [errEmbed('Already denied.')] });
-      const claim = arr[idx];
-      arr[idx].status = 'fulfilled'; arr[idx].fulfilledAt = Date.now(); arr[idx].fulfilledBy = me.username;
+    if (cmd==='claimed') {
+      await interaction.deferReply({flags:MessageFlags.Ephemeral});
+      const claimId=interaction.options.getString('id').toUpperCase();
+      const allClaims=await getClaims(), arr=Array.isArray(allClaims)?allClaims:[];
+      const idx=arr.findIndex(c=>c.claimId===claimId);
+      if (idx===-1)                    return interaction.editReply({embeds:[errEmbed(`Claim \`${claimId}\` not found.`)]});
+      if (arr[idx].status==='fulfilled') return interaction.editReply({embeds:[errEmbed('Already fulfilled.')]});
+      if (arr[idx].status==='denied')    return interaction.editReply({embeds:[errEmbed('Already denied.')]});
+      const claim=arr[idx];
+      arr[idx].status='fulfilled'; arr[idx].fulfilledAt=Date.now(); arr[idx].fulfilledBy=me.username;
       await saveClaims(arr);
-      // ── DM the user: fulfillment message ──
-      let dmSent = false;
+      let dmSent=false;
       try {
-        const t = await client.users.fetch(claim.userId);
-        const fulfillMsg = claim.category === 'Robux'
-          ? `<@${claim.userId}> your claim **${claimId}** for **${claim.itemName}** has been fulfilled by <@${me.id}>! Check your Roblox gamepass!`
-          : `<@${claim.userId}> your claim **${claimId}** for **${claim.itemName}** has been fulfilled by <@${me.id}>!\n\n**vru4447** has sent you a friend request on Roblox. Accept it and they will join your game to deliver your reward!`;
-        await t.send({ embeds: [new EmbedBuilder()
-          .setColor(0x57F287)
-          .setTitle('🎉 Claim Fulfilled!')
-          .setDescription(fulfillMsg)] });
-        dmSent = true;
+        const t=await client.users.fetch(claim.userId);
+        const fulfillMsg=claim.category==='Robux'
+          ?`Your claim **${claimId}** for **${claim.itemName}** has been fulfilled! Check your Roblox gamepass!`
+          :`Your claim **${claimId}** for **${claim.itemName}** has been fulfilled!\n\n**vru4447** has sent you a friend request on Roblox. Accept it and they will join your game to deliver your reward!`;
+        await t.send({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎉 Claim Fulfilled!').setDescription(fulfillMsg)]}); dmSent=true;
       } catch {}
-
-      // ── Public channel notification ──
+      try { await interaction.channel.send({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎉 Claim Fulfilled!').setDescription(`<@${claim.userId}> your claim **${claimId}** for **${claim.itemName}** has been fulfilled by <@${me.id}>!\n${claim.category==='Robux'?'Check your Roblox gamepass!':'Accept the friend request from **vru4447** on Roblox!'}`)]}); } catch {}
       try {
-        await interaction.channel.send({ embeds: [new EmbedBuilder()
-          .setColor(0x57F287)
-          .setTitle('🎉 Claim Fulfilled!')
-          .setDescription(
-            `<@${claim.userId}> your claim **${claimId}** for **${claim.itemName}** has been fulfilled by <@${me.id}>!\n` +
-            (claim.category === 'Robux' ? 'Check your Roblox gamepass!' : 'Accept the friend request from **vru4447** on Roblox!')
-          )] });
-      } catch {}
-
-      // ── Vouch system: DM reminders every hour until they vouch ──
-      try {
-        const t = await client.users.fetch(claim.userId);
-
-        // Send initial vouch DM right away (separate from fulfillment DM)
-        try {
-          await t.send({ embeds: [new EmbedBuilder()
-            .setColor(0x5865F2)
-            .setTitle('⭐ Please Leave a Vouch!')
-            .setDescription(
-              `Hey! You just received **${claim.itemName}** 🎉\n\n` +
-              `Please leave a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n` +
-              `**Format:** \`Vouch @${me.username} <your feedback>\`\n\n` +
-              `It only takes a second and helps us a lot! 🙏`
-            )
-            .setFooter({ text: `Claim ${claimId}` })] });
-        } catch {}
-
-        // Recurring hourly DM reminder — never stops until they vouch
-        const sendVouchReminder = async (attempt) => {
-          if (!pendingVouches.has(claim.userId)) return; // already vouched, stop
-          try {
-            const target = await client.users.fetch(claim.userId);
-            await target.send({ embeds: [new EmbedBuilder()
-              .setColor(0xFEE75C)
-              .setTitle('⭐ Reminder: Please Vouch!')
-              .setDescription(
-                `Hey! You received **${claim.itemName}** a while ago.\n\n` +
-                `Please drop a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n` +
-                `**Format:** \`Vouch @${me.username} <your feedback>\`\n\n` +
-                `This is reminder **#${attempt}** — we'll keep reminding you until you vouch! 🙏`
-              )
-              .setFooter({ text: `Claim ${claimId}` })] });
-          } catch {}
-
-          // Alert admins after 3 missed reminders, but keep reminding anyway
-          if (attempt === 3) {
-            try {
-              const ach = await client.channels.fetch(ALERT_CHANNEL_ID);
-              if (ach) {
-                const alertMsg = await ach.send({ embeds: [new EmbedBuilder()
-                  .setColor(0xED4245)
-                  .setTitle('⚠️ Vouch Not Received')
-                  .setDescription(`<@${claim.userId}> has not vouched after **3** reminders for **${claim.itemName}** (\`${claimId}\`).`)] });
-                // Save alert message so we can edit it when they eventually vouch
-                if (pendingVouches.has(claim.userId)) {
-                  pendingVouches.get(claim.userId).alertMsg = alertMsg;
-                }
-              }
-            } catch {}
-          }
-
-          // Schedule next reminder in 1 hour
-          if (pendingVouches.has(claim.userId)) {
-            const nextTimer = setTimeout(() => sendVouchReminder(attempt + 1), 60 * 60 * 1000);
-            pendingVouches.get(claim.userId).timeout = nextTimer;
-          }
+        const t=await client.users.fetch(claim.userId);
+        try { await t.send({embeds:[new EmbedBuilder().setColor(0x5865F2).setTitle('⭐ Please Leave a Vouch!').setDescription(`Hey! You just received **${claim.itemName}** 🎉\n\nPlease leave a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n**Format:** \`Vouch @${me.username} <your feedback>\`\n\nIt only takes a second and helps us a lot! 🙏`).setFooter({text:`Claim ${claimId}`})]}); } catch {}
+        const sendVouchReminder=async(attempt)=>{
+          if (!pendingVouches.has(claim.userId)) return;
+          try { const target=await client.users.fetch(claim.userId); await target.send({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⭐ Reminder: Please Vouch!').setDescription(`Hey! You received **${claim.itemName}** a while ago.\n\nPlease drop a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n**Format:** \`Vouch @${me.username} <your feedback>\`\n\nThis is reminder **#${attempt}** — we'll keep reminding you until you vouch! 🙏`).setFooter({text:`Claim ${claimId}`})]}); } catch {}
+          if (attempt===3) { try { const ach=await client.channels.fetch(ALERT_CHANNEL_ID); if(ach){const alertMsg=await ach.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⚠️ Vouch Not Received').setDescription(`<@${claim.userId}> has not vouched after **3** reminders for **${claim.itemName}** (\`${claimId}\`).`)]}); if(pendingVouches.has(claim.userId)) pendingVouches.get(claim.userId).alertMsg=alertMsg;} } catch {} }
+          if (pendingVouches.has(claim.userId)) { const nt=setTimeout(()=>sendVouchReminder(attempt+1),60*60*1000); pendingVouches.get(claim.userId).timeout=nt; }
         };
-
-        // First reminder after 1 hour
-        const vt = setTimeout(() => sendVouchReminder(1), 60 * 60 * 1000);
-        pendingVouches.set(claim.userId, { claimId, itemName: claim.itemName, fulfilledBy: me.username, timeout: vt });
+        const vt=setTimeout(()=>sendVouchReminder(1),60*60*1000);
+        pendingVouches.set(claim.userId,{claimId,itemName:claim.itemName,fulfilledBy:me.username,timeout:vt});
       } catch {}
-      return interaction.editReply({ embeds: [new EmbedBuilder()
-        .setColor(0x57F287)
-        .setTitle('✅ Claim Fulfilled')
-        .addFields(
-          { name: 'Claim', value: `\`${claimId}\``,      inline: true },
-          { name: 'User',  value: `<@${claim.userId}>`,   inline: true },
-          { name: 'Item',  value: claim.itemName,          inline: true },
-          { name: 'DM',    value: dmSent ? '✅ Sent' : '❌ DMs off', inline: true }
-        )] });
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Claim Fulfilled').addFields({name:'Claim',value:`\`${claimId}\``,inline:true},{name:'User',value:`<@${claim.userId}>`,inline:true},{name:'Item',value:claim.itemName,inline:true},{name:'DM',value:dmSent?'✅ Sent':'❌ DMs off',inline:true})]});
     }
 
-    // /deny-claim
-    if (cmd === 'deny-claim') {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const claimId   = interaction.options.getString('id').toUpperCase();
-      const reason    = interaction.options.getString('reason') || null;
-      const allClaims = await getClaims();
-      const arr       = Array.isArray(allClaims) ? allClaims : [];
-      const idx       = arr.findIndex(c => c.claimId === claimId);
-      if (idx === -1)                    return interaction.editReply({ embeds: [errEmbed(`Claim \`${claimId}\` not found.`)] });
-      if (arr[idx].status==='fulfilled') return interaction.editReply({ embeds: [errEmbed('Already fulfilled.')] });
-      if (arr[idx].status==='denied')    return interaction.editReply({ embeds: [errEmbed('Already denied.')] });
-      const claim = arr[idx];
-      arr[idx].status = 'denied'; arr[idx].deniedAt = Date.now(); arr[idx].deniedBy = me.username;
-      if (reason) arr[idx].deniedReason = reason;
+    if (cmd==='deny-claim') {
+      await interaction.deferReply({flags:MessageFlags.Ephemeral});
+      const claimId=interaction.options.getString('id').toUpperCase(), reason=interaction.options.getString('reason')||null;
+      const allClaims=await getClaims(), arr=Array.isArray(allClaims)?allClaims:[];
+      const idx=arr.findIndex(c=>c.claimId===claimId);
+      if (idx===-1)                    return interaction.editReply({embeds:[errEmbed(`Claim \`${claimId}\` not found.`)]});
+      if (arr[idx].status==='fulfilled') return interaction.editReply({embeds:[errEmbed('Already fulfilled.')]});
+      if (arr[idx].status==='denied')    return interaction.editReply({embeds:[errEmbed('Already denied.')]});
+      const claim=arr[idx];
+      arr[idx].status='denied'; arr[idx].deniedAt=Date.now(); arr[idx].deniedBy=me.username;
+      if (reason) arr[idx].deniedReason=reason;
       await saveClaims(arr);
-      const shopItem = SHOP.find(i => i.id === claim.itemId);
-      const u = await getUser(claim.userId, claim.username);
-      u.inventory.push({ claimId: claim.claimId, itemId: claim.itemId, name: claim.itemName, category: claim.category, robuxAmt: claim.robuxAmt||0, cost: shopItem ? shopItem.cost : 0 });
+      const shopItem=SHOP.find(i=>i.id===claim.itemId);
+      const u=await getUser(claim.userId,claim.username);
+      u.inventory.push({claimId:claim.claimId,itemId:claim.itemId,name:claim.itemName,category:claim.category,robuxAmt:claim.robuxAmt||0,cost:shopItem?shopItem.cost:0});
       await saveUser(u);
-      const store = await getStore();
-      if      (claim.category==='Robux')      store.robux      += (claim.robuxAmt||0);
-      else if (claim.itemId==='etfb_cel')     store.celestials += 1;
-      else if (claim.itemId==='etfb_div')     store.divines    += 1;
-      await saveStore(store);
-      await updateStockEmbed(client);
-      let dmSent = false;
+      const store=await getStore();
+      if (claim.category==='Robux') store.robux+=(claim.robuxAmt||0);
+      else if (claim.itemId==='etfb_cel') store.celestials+=1;
+      else if (claim.itemId==='etfb_div') store.divines+=1;
+      await saveStore(store); await updateStockEmbed(client);
+      let dmSent=false;
       try {
-        const t = await client.users.fetch(claim.userId);
-        await t.send({ embeds: [new EmbedBuilder()
-          .setColor(0xED4245)
-          .setTitle('❌ Claim Denied')
-          .setDescription(
-            `Your claim \`${claimId}\` for **${claim.itemName}** was denied.\n\n` +
-            (reason ? `**Reason:** ${reason}\n\n` : '') +
-            `The item has been returned to your inventory.\nUse \`/claim ${claimId}\` to re-submit.`
-          )] });
-        dmSent = true;
+        const t=await client.users.fetch(claim.userId);
+        await t.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('❌ Claim Denied').setDescription(`Your claim \`${claimId}\` for **${claim.itemName}** was denied.\n\n${reason?`**Reason:** ${reason}\n\n`:''}The item has been returned to your inventory.\nUse \`/claim ${claimId}\` to re-submit.`)]});
+        dmSent=true;
       } catch {}
-      return interaction.editReply({ embeds: [new EmbedBuilder()
-        .setColor(0xED4245)
-        .setTitle('❌ Claim Denied')
-        .addFields(
-          { name: 'Claim',    value: `\`${claimId}\``,                          inline: true },
-          { name: 'User',     value: `<@${claim.userId}>`,                         inline: true },
-          { name: 'Item',     value: claim.itemName,                                inline: true },
-          { name: 'Reason',   value: reason || 'No reason given',                  inline: false },
-          { name: 'Refunded', value: '✅ Inventory',                               inline: true },
-          { name: 'Stock',    value: '✅ Restored',                                inline: true },
-          { name: 'DM',       value: dmSent ? '✅ Sent' : '❌ DMs off',            inline: true }
-        )] });
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('❌ Claim Denied').addFields({name:'Claim',value:`\`${claimId}\``,inline:true},{name:'User',value:`<@${claim.userId}>`,inline:true},{name:'Item',value:claim.itemName,inline:true},{name:'Reason',value:reason||'No reason given',inline:false},{name:'Refunded',value:'✅ Inventory',inline:true},{name:'Stock',value:'✅ Restored',inline:true},{name:'DM',value:dmSent?'✅ Sent':'❌ DMs off',inline:true})]});
     }
 
-    // /timeout
-    if (cmd === 'timeout') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t      = interaction.options.getUser('user');
-      const mins   = interaction.options.getInteger('minutes');
-      const reason = interaction.options.getString('reason') || 'No reason given';
+    if (cmd==='give') {
+      const t=interaction.options.getUser('user'), amt=interaction.options.getInteger('amount');
+      const u=await getUser(t.id,t.username); u.coins+=amt; u.totalEarned=(u.totalEarned||0)+amt; await saveUser(u);
+      return reply({embeds:[okEmbed(`Gave **${amt}** ${COIN_EMOJI} to <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)]});
+    }
+    if (cmd==='take') {
+      const t=interaction.options.getUser('user'), amt=interaction.options.getInteger('amount');
+      const u=await getUser(t.id,t.username); u.coins=Math.max(0,u.coins-amt); await saveUser(u);
+      return reply({embeds:[okEmbed(`Took **${amt}** ${COIN_EMOJI} from <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)]});
+    }
+
+    // ── CODES (all saved to JSONBin now) ──
+    if (cmd==='make-code') {
+      const code=interaction.options.getString('code').toUpperCase().trim();
+      const coins=interaction.options.getInteger('coins');
+      const desc=interaction.options.getString('description')||'🎟️ Special code';
+      if (await codeExists(code)) return reply({embeds:[errEmbed(`Code \`${code}\` already exists!`)]});
+      const codeObj={coins, description:desc, multiUse:false};
+      await saveCode(code, codeObj);
+      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎟️ Code Created & Saved!')
+        .addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Description',value:desc,inline:true})
+        .setFooter({text:'✅ Saved to JSONBin — survives bot restarts!'})]});
+    }
+
+    if (cmd==='drop-code') {
+      const code=interaction.options.getString('code').toUpperCase().trim();
+      const coins=interaction.options.getInteger('coins');
+      const mins=interaction.options.getInteger('minutes');
+      const desc=interaction.options.getString('description')||'🎟️ Limited drop';
+      if (await codeExists(code)) return reply({embeds:[errEmbed(`Code \`${code}\` already exists!`)]});
+      const expiresAt=Date.now()+mins*60*1000;
+      const codeObj={coins,description:desc,expiresAt,multiUse:true,redeemedBy:[]};
+      await saveCode(code, codeObj);
+      let dropMsg=null;
       try {
-        const member = await interaction.guild.members.fetch(t.id);
-        await member.timeout(mins * 60 * 1000, reason);
-        try {
-          await t.send({ embeds: [new EmbedBuilder()
-            .setColor(0xED4245)
-            .setTitle('🔇 You have been timed out')
-            .setDescription(
-              `You have been timed out in **${interaction.guild.name}** for **${mins} minute(s)**.\n\n` +
-              `**Reason:** ${reason}`
-            )] });
-        } catch {}
-        return reply({ embeds: [new EmbedBuilder()
-          .setColor(0xED4245)
-          .setTitle('🔇 User Timed Out')
-          .addFields(
-            { name: 'User',     value: `<@${t.id}>`,   inline: true },
-            { name: 'Duration', value: `${mins} min(s)`, inline: true },
-            { name: 'Reason',   value: reason,           inline: false }
-          )] });
-      } catch (e) {
-        return reply({ embeds: [errEmbed(`Failed to timeout <@${t.id}>: ${e.message}`)] });
-      }
-    }
-
-    // /untimeout
-    if (cmd === 'untimeout') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t      = interaction.options.getUser('user');
-      const reason = interaction.options.getString('reason') || 'No reason given';
-      try {
-        const member = await interaction.guild.members.fetch(t.id);
-        await member.timeout(null, reason);
-        try {
-          await t.send({ embeds: [new EmbedBuilder()
-            .setColor(0x57F287)
-            .setTitle('🔊 Timeout Removed')
-            .setDescription(`Your timeout in **${interaction.guild.name}** has been removed.`)] });
-        } catch {}
-        return reply({ embeds: [new EmbedBuilder()
-          .setColor(0x57F287)
-          .setTitle('🔊 Timeout Removed')
-          .addFields(
-            { name: 'User',   value: `<@${t.id}>`, inline: true },
-            { name: 'Reason', value: reason,         inline: false }
-          )] });
-      } catch (e) {
-        return reply({ embeds: [errEmbed(`Failed to remove timeout from <@${t.id}>: ${e.message}`)] });
-      }
-    }
-
-    // /gtn
-    if (cmd === 'gtn') {
-      const min    = interaction.options.getInteger('min');
-      const max    = interaction.options.getInteger('max');
-      const answer = interaction.options.getInteger('number');
-      const prize  = interaction.options.getInteger('prize');
-      const GTN_CHANNEL_ID = '1480823997498134540';
-
-      if (answer < min || answer > max)
-        return reply({ embeds: [errEmbed(`The winning number must be between **${min}** and **${max}**!`)] });
-
-      if (activeGTN.has(GTN_CHANNEL_ID))
-        return reply({ embeds: [errEmbed('A GTN game is already running! Wait for it to end.')] });
-
-      activeGTN.set(GTN_CHANNEL_ID, { answer, prize, min, max, active: true, prizeType: 'coins' });
-
-      try {
-        const gtnCh = await client.channels.fetch(GTN_CHANNEL_ID);
-        if (gtnCh) {
-          await gtnCh.send({ embeds: [new EmbedBuilder()
-            .setColor(0x9B59B6)
-            .setTitle('🎮 Guess the Number!')
-            .setDescription(
-              `A new game has started! Can you guess the number?\n\n` +
-              `> 🔢 **Range:** ${min} – ${max}\n` +
-              `> 🏆 **Prize:** **${prize}** ${COIN_EMOJI}\n\n` +
-              `Type a number in this channel to guess!\n` +
-              `First correct guess wins! No hints will be given.`
-            )
-            .setFooter({ text: 'Good luck! 🍀' })
-            .setTimestamp()] });
-        }
-      } catch (e) { console.error('GTN channel send error:', e.message); }
-
-      return reply({ embeds: [new EmbedBuilder()
-        .setColor(0x57F287)
-        .setTitle('✅ GTN Game Started!')
-        .addFields(
-          { name: 'Range',  value: `${min} – ${max}`,           inline: true },
-          { name: 'Answer', value: `**${answer}**`,              inline: true },
-          { name: 'Prize',  value: `**${prize}** ${COIN_EMOJI}`, inline: true }
-        )
-        .setFooter({ text: 'Only you can see this' })], flags: MessageFlags.Ephemeral });
-    }
-
-    if (cmd === 'give') {
-      const t = interaction.options.getUser('user'), amt = interaction.options.getInteger('amount');
-      const u = await getUser(t.id, t.username); u.coins += amt; u.totalEarned = (u.totalEarned||0)+amt; await saveUser(u);
-      return reply({ embeds: [okEmbed(`Gave **${amt}** ${COIN_EMOJI} to <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)] });
-    }
-    if (cmd === 'take') {
-      const t = interaction.options.getUser('user'), amt = interaction.options.getInteger('amount');
-      const u = await getUser(t.id, t.username); u.coins = Math.max(0, u.coins-amt); await saveUser(u);
-      return reply({ embeds: [okEmbed(`Took **${amt}** ${COIN_EMOJI} from <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)] });
-    }
-    if (cmd === 'make-code') {
-      const code = interaction.options.getString('code').toUpperCase().trim();
-      const coins = interaction.options.getInteger('coins');
-      const desc  = interaction.options.getString('description') || '🎟️ Special code';
-      if (CODES[code]) return reply({ embeds: [errEmbed(`Code \`${code}\` already exists! (gives ${CODES[code].coins} coins)`)] });
-      CODES[code] = { coins, description: desc };
-      return reply({ embeds: [new EmbedBuilder()
-        .setColor(0x57F287)
-        .setTitle('🎟️ Code Created!')
-        .addFields(
-          { name: 'Code',        value: `\`${code}\``,  inline: true },
-          { name: 'Coins',       value: `**${coins}** ${COIN_EMOJI}`, inline: true },
-          { name: 'Description', value: desc,            inline: true }
-        )
-        .setFooter({ text: 'Code is active until the bot restarts. Add it to CODES in bot.js to make it permanent.' })] });
-    }
-    if (cmd === 'drop-code') {
-      const code  = interaction.options.getString('code').toUpperCase().trim();
-      const coins = interaction.options.getInteger('coins');
-      const mins  = interaction.options.getInteger('minutes');
-      const desc  = interaction.options.getString('description') || '🎟️ Limited drop';
-      if (CODES[code]) return reply({ embeds: [errEmbed(`Code \`${code}\` already exists!`)] });
-      const expiresAt = Date.now() + mins * 60 * 1000;
-      CODES[code] = { coins, description: desc, expiresAt, multiUse: true, redeemedBy: [] };
-
-      // Send announcement to drop channel with @here ping
-      const DROP_CHANNEL_ID = '1481582652430483579';
-      let dropMsg = null;
-      try {
-        const dropCh = await client.channels.fetch(DROP_CHANNEL_ID);
-        if (dropCh) {
-          dropMsg = await dropCh.send({
-            content: '@here',
-            allowedMentions: { parse: ['everyone'] },
-            embeds: [new EmbedBuilder()
-              .setColor(0xF1C40F)
-              .setTitle('🎟️ Code Drop!')
-              .setDescription(
-                `A new code has been dropped!
-
-` +
-                `Use \`/use-code ${code}\` to claim **${coins}** ${COIN_EMOJI}!
-
-` +
-                `⏰ Expires ${ts(expiresAt)} — ${ts(expiresAt, 'T')} your time`
-              )
-              .setFooter({ text: `${desc}` })],
-          });
-        }
-      } catch (e) { console.error('Drop announce error:', e.message); }
-
-      // Auto-expire: delete code + edit the drop message
-      setTimeout(async () => {
-        const redeemCount = (CODES[code]?.redeemedBy || []).length;
-        delete CODES[code];
+        const dropCh=await client.channels.fetch(DROP_CHANNEL_ID);
+        if (dropCh) dropMsg=await dropCh.send({content:'@here',allowedMentions:{parse:['everyone']},embeds:[new EmbedBuilder().setColor(0xF1C40F).setTitle('🎟️ Code Drop!').setDescription(`A new code has been dropped!\n\nUse \`/use-code ${code}\` to claim **${coins}** ${COIN_EMOJI}!\n\n⏰ Expires ${ts(expiresAt)} — ${ts(expiresAt,'T')} your time`).setFooter({text:desc})]});
+      } catch(e){console.error('Drop announce error:',e.message);}
+      setTimeout(async()=>{
+        const saved=await dbRead('codes').catch(()=>({}));
+        const redeemCount=(saved[code]?.redeemedBy||[]).length;
+        await deleteCode(code);
         if (dropMsg) {
-          try {
-            await dropMsg.edit({
-              content: '',
-              embeds: [new EmbedBuilder()
-                .setColor(0xED4245)
-                .setTitle('🎟️ Code Expired!')
-                .setDescription(
-                  `The code drop has ended!
-
-` +
-                  `**${redeemCount}** member(s) claimed **${coins}** ${COIN_EMOJI} each.
-
-` +
-                  `Stay active for future drops!`
-                )
-                .setFooter({ text: `Code was active for ${mins} minute(s)` })],
-            });
-          } catch (e) { console.error('Drop expire edit error:', e.message); }
+          try { await dropMsg.edit({content:'',embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🎟️ Code Expired!').setDescription(`The code drop has ended!\n\n**${redeemCount}** member(s) claimed **${coins}** ${COIN_EMOJI} each.\n\nStay active for future drops!`).setFooter({text:`Code was active for ${mins} minute(s)`})]}); } catch(e){console.error('Drop expire edit error:',e.message);}
         }
-      }, mins * 60 * 1000);
+      },mins*60*1000);
+      return reply({embeds:[new EmbedBuilder().setColor(0xF1C40F).setTitle('🎟️ Code Dropped & Saved!').setDescription(`Code \`${code}\` is now live! Expires ${ts(expiresAt)}`).addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Expires',value:ts(expiresAt),inline:true}).setFooter({text:'✅ Saved to JSONBin — auto-deleted when expired'})]});
+    }
 
-      return reply({ embeds: [new EmbedBuilder()
-        .setColor(0xF1C40F)
-        .setTitle('🎟️ Code Dropped!')
-        .setDescription(`Code \`${code}\` is now live! Expires ${ts(expiresAt)}`)
-        .addFields(
-          { name: 'Code',    value: `\`${code}\``,                inline: true },
-          { name: 'Coins',   value: `**${coins}** ${COIN_EMOJI}`, inline: true },
-          { name: 'Expires', value: ts(expiresAt),                inline: true }
-        )] });
+    if (cmd==='remove-code') {
+      const code=interaction.options.getString('code').toUpperCase().trim();
+      const all=await getCodes();
+      if (!(code in all)) return reply({embeds:[errEmbed(`Code \`${code}\` doesn't exist!`)]});
+      if (code in PERMANENT_CODES) return reply({embeds:[errEmbed(`\`${code}\` is a permanent hardcoded code — edit PERMANENT_CODES in bot.js to remove it.`)]});
+      const {coins, redeemedBy}=all[code];
+      const redeemCount=(redeemedBy||[]).length;
+      await deleteCode(code);
+      return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🗑️ Code Removed').setDescription(`Code \`${code}\` has been deleted from the database.`).addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Redeemed',value:`${redeemCount} time(s)`,inline:true},{name:'Coins/use',value:`**${coins}** ${COIN_EMOJI}`,inline:true})]});
     }
-    if (cmd === 'remove-code') {
-      const code = interaction.options.getString('code').toUpperCase().trim();
-      if (!CODES[code]) return reply({ embeds: [errEmbed(`Code \`${code}\` doesn't exist!`)] });
-      const { coins, redeemedBy } = CODES[code];
-      const redeemCount = (redeemedBy || []).length;
-      delete CODES[code];
-      return reply({ embeds: [new EmbedBuilder()
-        .setColor(0xED4245)
-        .setTitle('🗑️ Code Removed')
-        .setDescription(`Code \`${code}\` has been removed.`)
-        .addFields(
-          { name: 'Code',      value: `\`${code}\``,                inline: true },
-          { name: 'Redeemed',  value: `${redeemCount} time(s)`,     inline: true },
-          { name: 'Coins/use', value: `**${coins}** ${COIN_EMOJI}`, inline: true }
-        )] });
+
+    if (cmd==='list-codes') {
+      const all=await getCodes();
+      const entries=Object.entries(all);
+      if (!entries.length) return reply({embeds:[new EmbedBuilder().setColor(0xFEE75C).setDescription('No active codes right now.')],flags:MessageFlags.Ephemeral});
+      const lines=entries.map(([key,c])=>{
+        const isPerm=key in PERMANENT_CODES;
+        const type=c.multiUse?'🔄 Multi-use':'1️⃣ One-time';
+        const expiry=c.expiresAt?` · Expires ${ts(c.expiresAt)}`:'';
+        const perm=isPerm?' · **Permanent**':'';
+        return `**\`${key}\`** — **${c.coins}** ${COIN_EMOJI} · ${type}${expiry}${perm}`;
+      }).join('\n');
+      return reply({embeds:[new EmbedBuilder().setColor(0xF1C40F).setTitle(`🎟️ Active Codes — ${entries.length} total`).setDescription(lines)],flags:MessageFlags.Ephemeral});
     }
-    if (cmd === 'remove-inv') {
-      const t       = interaction.options.getUser('user');
-      const claimId = interaction.options.getString('claim_id').toUpperCase();
-      const u       = await getUser(t.id, t.username);
-      const idx     = (u.inventory||[]).findIndex(i => i.claimId === claimId);
-      if (idx === -1) return reply({ embeds: [errEmbed(`No item \`${claimId}\` in <@${t.id}>'s inventory.`)], flags: MessageFlags.Ephemeral });
-      const removed = u.inventory.splice(idx, 1)[0];
-      await saveUser(u);
-      return reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('🗑️ Removed').setDescription(`Removed **${removed.name}** (\`${claimId}\`) from <@${t.id}>'s inventory.`)] });
+
+    if (cmd==='remove-inv') {
+      const t=interaction.options.getUser('user'), claimId=interaction.options.getString('claim_id').toUpperCase();
+      const u=await getUser(t.id,t.username), idx=(u.inventory||[]).findIndex(i=>i.claimId===claimId);
+      if (idx===-1) return reply({embeds:[errEmbed(`No item \`${claimId}\` in <@${t.id}>'s inventory.`)],flags:MessageFlags.Ephemeral});
+      const removed=u.inventory.splice(idx,1)[0]; await saveUser(u);
+      return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🗑️ Removed').setDescription(`Removed **${removed.name}** (\`${claimId}\`) from <@${t.id}>'s inventory.`)]});
     }
-    if (cmd === 'check-inventory') {
-      const t   = interaction.options.getUser('user');
-      const u   = await getUser(t.id, t.username), inv = u.inventory || [];
-      if (!inv.length) return reply({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setDescription(`🎒 <@${t.id}>'s inventory is empty.`)], flags: MessageFlags.Ephemeral });
-      const list = inv.map(i => `${i.category==='Robux'?'💎':i.name==='Divine'?'🌟':'✨'} **${i.name}** — \`${i.claimId}\``).join('\n');
-      return reply({ embeds: [new EmbedBuilder().setTitle(`🎒 ${t.username}'s Inventory`).setColor(0x9B59B6).setDescription(list).setFooter({ text: `${inv.length} item(s)` })], flags: MessageFlags.Ephemeral });
+    if (cmd==='check-inventory') {
+      const t=interaction.options.getUser('user'), u=await getUser(t.id,t.username), inv=u.inventory||[];
+      if (!inv.length) return reply({embeds:[new EmbedBuilder().setColor(0xFEE75C).setDescription(`🎒 <@${t.id}>'s inventory is empty.`)],flags:MessageFlags.Ephemeral});
+      const list=inv.map(i=>`${i.category==='Robux'?'💎':i.name==='Divine'?'🌟':'✨'} **${i.name}** — \`${i.claimId}\``).join('\n');
+      return reply({embeds:[new EmbedBuilder().setTitle(`🎒 ${t.username}'s Inventory`).setColor(0x9B59B6).setDescription(list).setFooter({text:`${inv.length} item(s)`})],flags:MessageFlags.Ephemeral});
     }
-    if (cmd === 'update-robux') {
+    if (cmd==='update-robux') {
       await interaction.deferReply();
-      const store = await getStore(); store.robux = interaction.options.getInteger('amount');
-      await saveStore(store); await updateStockEmbed(client);
-      return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Stock Updated').setDescription(`💎 Robux set to **${store.robux}**.`)] });
+      const store=await getStore(); store.robux=interaction.options.getInteger('amount'); await saveStore(store); await updateStockEmbed(client);
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Stock Updated').setDescription(`💎 Robux set to **${store.robux}**.`)]});
     }
-    if (cmd === 'update-etfb') {
+    if (cmd==='update-etfb') {
       await interaction.deferReply();
-      const type = interaction.options.getString('type'), amt = interaction.options.getInteger('amount');
-      const store = await getStore(); store[type] = amt;
-      await saveStore(store); await updateStockEmbed(client);
-      return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Stock Updated').setDescription(`${type==='divines'?'🌟 Divines':'✨ Celestials'} set to **${amt}x**.`)] });
+      const type=interaction.options.getString('type'), amt=interaction.options.getInteger('amount');
+      const store=await getStore(); store[type]=amt; await saveStore(store); await updateStockEmbed(client);
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Stock Updated').setDescription(`${type==='divines'?'🌟 Divines':'✨ Celestials'} set to **${amt}x**.`)]});
     }
 
-    // /timeout
-    if (cmd === 'timeout') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t      = interaction.options.getUser('user');
-      const mins   = interaction.options.getInteger('minutes');
-      const reason = interaction.options.getString('reason') || 'No reason given';
+    if (cmd==='gtn') {
+      const min=interaction.options.getInteger('min'), max=interaction.options.getInteger('max');
+      const answer=interaction.options.getInteger('number'), prize=interaction.options.getInteger('prize');
+      if (answer<min||answer>max) return reply({embeds:[errEmbed(`The winning number must be between **${min}** and **${max}**!`)]});
+      if (activeGTN.has(GTN_CHANNEL_ID)) return reply({embeds:[errEmbed('A GTN game is already running! Wait for it to end.')]});
+      activeGTN.set(GTN_CHANNEL_ID,{answer,prize,min,max,active:true});
       try {
-        const member = await interaction.guild.members.fetch(t.id);
-        await member.timeout(mins * 60 * 1000, reason);
-        try { await t.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('⏱️ You have been timed out').addFields({name:'Duration',value:`${mins} minute(s)`,inline:true},{name:'Reason',value:reason,inline:true},{name:'Server',value:interaction.guild.name,inline:true})] }); } catch {}
-        return reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('⏱️ User Timed Out').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Duration',value:`${mins} min`,inline:true},{name:'Reason',value:reason,inline:false})] });
-      } catch (e) { return reply({ embeds: [errEmbed(`Failed to timeout: ${e.message}`)] }); }
+        const gtnCh=await client.channels.fetch(GTN_CHANNEL_ID);
+        if(gtnCh) await gtnCh.send({embeds:[new EmbedBuilder().setColor(0x9B59B6).setTitle('🎮 Guess the Number!').setDescription(`A new game has started!\n\n> 🔢 **Range:** ${min} – ${max}\n> 🏆 **Prize:** **${prize}** ${COIN_EMOJI}\n\nType a number in this channel to guess!\nFirst correct guess wins!`).setFooter({text:`Hosted by ${me.username}`}).setTimestamp()]});
+      } catch(e){console.error('GTN channel send error:',e.message);}
+      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ GTN Game Started!').addFields({name:'Range',value:`${min} – ${max}`,inline:true},{name:'Answer',value:`**${answer}**`,inline:true},{name:'Prize',value:`**${prize}** ${COIN_EMOJI}`,inline:true}).setFooter({text:'Only you can see this'})],flags:MessageFlags.Ephemeral});
     }
 
-    // /untimeout
-    if (cmd === 'untimeout') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t      = interaction.options.getUser('user');
-      const reason = interaction.options.getString('reason') || 'No reason given';
+    // ── MODERATION ──
+    if (cmd==='timeout') {
+      if (!isModerator(interaction.member)) return reply({embeds:[errEmbed('You need a Moderator or Admin role!')],flags:MessageFlags.Ephemeral});
+      const t=interaction.options.getUser('user'), mins=interaction.options.getInteger('minutes'), reason=interaction.options.getString('reason')||'No reason given';
       try {
-        const member = await interaction.guild.members.fetch(t.id);
+        const member=await interaction.guild.members.fetch(t.id);
+        await member.timeout(mins*60*1000, reason);
+        try { await t.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⏱️ You have been timed out').addFields({name:'Duration',value:`${mins} minute(s)`,inline:true},{name:'Reason',value:reason,inline:true},{name:'Server',value:interaction.guild.name,inline:true})]}); } catch {}
+        return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⏱️ User Timed Out').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Duration',value:`${mins} min`,inline:true},{name:'Reason',value:reason,inline:false})]});
+      } catch(e){return reply({embeds:[errEmbed(`Failed to timeout: ${e.message}`)]}); }
+    }
+    if (cmd==='untimeout') {
+      if (!isModerator(interaction.member)) return reply({embeds:[errEmbed('You need a Moderator or Admin role!')],flags:MessageFlags.Ephemeral});
+      const t=interaction.options.getUser('user'), reason=interaction.options.getString('reason')||'No reason given';
+      try {
+        const member=await interaction.guild.members.fetch(t.id);
         await member.timeout(null, reason);
-        try { await t.send({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Timeout Removed').setDescription(`Your timeout in **${interaction.guild.name}** has been removed.
-**Reason:** ${reason}`)] }); } catch {}
-        return reply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Timeout Removed').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})] });
-      } catch (e) { return reply({ embeds: [errEmbed(`Failed to untimeout: ${e.message}`)] }); }
+        try { await t.send({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Timeout Removed').setDescription(`Your timeout in **${interaction.guild.name}** has been removed.\n**Reason:** ${reason}`)]}); } catch {}
+        return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Timeout Removed').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
+      } catch(e){return reply({embeds:[errEmbed(`Failed to untimeout: ${e.message}`)]}); }
     }
-
-    // /warn
-    if (cmd === 'warn') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t      = interaction.options.getUser('user');
-      const reason = interaction.options.getString('reason') || 'No reason given';
-      const warns  = await getWarns(t.id);
-      warns.push({ reason, by: me.username, at: Date.now() });
-      await saveWarns(t.id, warns);
-      try { await t.send({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ You have been warned').addFields({name:'Reason',value:reason,inline:false},{name:'Total Warns',value:`${warns.length}`,inline:true},{name:'Server',value:interaction.guild.name,inline:true})] }); } catch {}
-      return reply({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ User Warned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Warn #',value:`${warns.length}`,inline:true},{name:'Reason',value:reason,inline:false})] });
+    if (cmd==='warn') {
+      if (!isModerator(interaction.member)) return reply({embeds:[errEmbed('You need a Moderator or Admin role!')],flags:MessageFlags.Ephemeral});
+      const t=interaction.options.getUser('user'), reason=interaction.options.getString('reason')||'No reason given';
+      const warns=await getWarns(t.id); warns.push({reason,by:me.username,at:Date.now()}); await saveWarns(t.id,warns);
+      try { await t.send({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ You have been warned').addFields({name:'Reason',value:reason,inline:false},{name:'Total Warns',value:`${warns.length}`,inline:true},{name:'Server',value:interaction.guild.name,inline:true})]}); } catch {}
+      return reply({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ User Warned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Warn #',value:`${warns.length}`,inline:true},{name:'Reason',value:reason,inline:false})]});
     }
-
-    // /unwarn
-    if (cmd === 'unwarn') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t     = interaction.options.getUser('user');
-      const index = interaction.options.getInteger('index') - 1;
-      const warns = await getWarns(t.id);
-      if (!warns.length) return reply({ embeds: [errEmbed(`<@${t.id}> has no warns.`)] });
-      if (index < 0 || index >= warns.length) return reply({ embeds: [errEmbed(`Invalid warn number. Use /check-warns to see the list.`)] });
-      const removed = warns.splice(index, 1)[0];
-      await saveWarns(t.id, warns);
-      return reply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Warn Removed').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Removed Warn',value:removed.reason,inline:false},{name:'Remaining Warns',value:`${warns.length}`,inline:true})] });
+    if (cmd==='unwarn') {
+      if (!isModerator(interaction.member)) return reply({embeds:[errEmbed('You need a Moderator or Admin role!')],flags:MessageFlags.Ephemeral});
+      const t=interaction.options.getUser('user'), index=interaction.options.getInteger('index')-1;
+      const warns=await getWarns(t.id);
+      if (!warns.length) return reply({embeds:[errEmbed(`<@${t.id}> has no warns.`)]});
+      if (index<0||index>=warns.length) return reply({embeds:[errEmbed('Invalid warn number. Use /warns to see the list.')]});
+      const removed=warns.splice(index,1)[0]; await saveWarns(t.id,warns);
+      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Warn Removed').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Removed Warn',value:removed.reason,inline:false},{name:'Remaining Warns',value:`${warns.length}`,inline:true})]});
     }
-
-    // /warns
-    if (cmd === 'warns' || cmd === 'check-warns') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t     = interaction.options.getUser('user');
-      const warns = await getWarns(t.id);
-      if (!warns.length) return reply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle(`⚠️ Warns — ${t.username}`).setDescription('This user has no warns! ✅')] });
-      const list = warns.map((w, i) => `**#${i+1}** \u2014 ${w.reason}\n> By ${w.by} \u00b7 ${ts(w.at, 'R')}`).join('\n\n');
-      return reply({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle(`⚠️ Warns — ${t.username}`).setDescription(list).setFooter({text:`${warns.length} total warn(s)`})] });
+    if (cmd==='warns') {
+      if (!isModerator(interaction.member)) return reply({embeds:[errEmbed('You need a Moderator or Admin role!')],flags:MessageFlags.Ephemeral});
+      const t=interaction.options.getUser('user'), warns=await getWarns(t.id);
+      if (!warns.length) return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle(`⚠️ Warns — ${t.username}`).setDescription('This user has no warns! ✅')]});
+      const list=warns.map((w,i)=>`**#${i+1}** — ${w.reason}\n> By ${w.by} · ${ts(w.at,'R')}`).join('\n\n');
+      return reply({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle(`⚠️ Warns — ${t.username}`).setDescription(list).setFooter({text:`${warns.length} total warn(s)`})]});
     }
-
-    // /kick
-    if (cmd === 'kick') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t      = interaction.options.getUser('user');
-      const reason = interaction.options.getString('reason') || 'No reason given';
+    if (cmd==='kick') {
+      if (!isModerator(interaction.member)) return reply({embeds:[errEmbed('You need a Moderator or Admin role!')],flags:MessageFlags.Ephemeral});
+      const t=interaction.options.getUser('user'), reason=interaction.options.getString('reason')||'No reason given';
       try {
-        const member = await interaction.guild.members.fetch(t.id);
-        try { await t.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('👢 You have been kicked').addFields({name:'Reason',value:reason,inline:false},{name:'Server',value:interaction.guild.name,inline:true})] }); } catch {}
+        const member=await interaction.guild.members.fetch(t.id);
+        try { await t.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('👢 You have been kicked').addFields({name:'Reason',value:reason,inline:false},{name:'Server',value:interaction.guild.name,inline:true})]}); } catch {}
         await member.kick(reason);
-        return reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('👢 User Kicked').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})] });
-      } catch (e) { return reply({ embeds: [errEmbed(`Failed to kick: ${e.message}`)] }); }
+        return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('👢 User Kicked').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
+      } catch(e){return reply({embeds:[errEmbed(`Failed to kick: ${e.message}`)]}); }
     }
-
-    // /ban
-    if (cmd === 'ban') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const t      = interaction.options.getUser('user');
-      const reason = interaction.options.getString('reason') || 'No reason given';
+    if (cmd==='ban') {
+      if (!isModerator(interaction.member)) return reply({embeds:[errEmbed('You need a Moderator or Admin role!')],flags:MessageFlags.Ephemeral});
+      const t=interaction.options.getUser('user'), reason=interaction.options.getString('reason')||'No reason given';
       try {
-        try { await t.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('🔨 You have been banned').addFields({name:'Reason',value:reason,inline:false},{name:'Server',value:interaction.guild.name,inline:true})] }); } catch {}
-        await interaction.guild.members.ban(t.id, { reason });
-        return reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('🔨 User Banned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})] });
-      } catch (e) { return reply({ embeds: [errEmbed(`Failed to ban: ${e.message}`)] }); }
+        try { await t.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🔨 You have been banned').addFields({name:'Reason',value:reason,inline:false},{name:'Server',value:interaction.guild.name,inline:true})]}); } catch {}
+        await interaction.guild.members.ban(t.id,{reason});
+        return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🔨 User Banned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
+      } catch(e){return reply({embeds:[errEmbed(`Failed to ban: ${e.message}`)]}); }
     }
 
-    // /unban
-    if (cmd === 'unban') {
-      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
-      const userId = interaction.options.getString('userid').trim();
-      const reason = interaction.options.getString('reason') || 'No reason given';
-      try {
-        await interaction.guild.members.unban(userId, reason);
-        return reply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ User Unbanned').addFields({name:'User ID',value:userId,inline:true},{name:'Reason',value:reason,inline:false})] });
-      } catch (e) { return reply({ embeds: [errEmbed(`Failed to unban: ${e.message}`)] }); }
-    }
-
-  } catch (e) {
-    console.error(`/${cmd} error:`, e);
-    const err = { embeds: [errEmbed('Something went wrong!')], flags: MessageFlags.Ephemeral };
-    try { interaction.replied || interaction.deferred ? await interaction.followUp(err) : await interaction.reply(err); } catch {}
+  } catch(e) {
+    console.error(`/${cmd} error:`,e);
+    const err={embeds:[errEmbed('Something went wrong!')],flags:MessageFlags.Ephemeral};
+    try { interaction.replied||interaction.deferred?await interaction.followUp(err):await interaction.reply(err); } catch {}
   }
 });
 
-// Heartbeat log every 5 min so host doesn't think it's dead
-setInterval(() => console.log('Heartbeat:', new Date().toISOString()), 300_000);
-
+setInterval(()=>console.log('Heartbeat:',new Date().toISOString()),300_000);
 client.login(BOT_TOKEN);
