@@ -987,7 +987,7 @@ client.on('interactionCreate', async interaction => {
 
       const won    = gamblingRoll(bet);
       const result = Math.random() < 0.5 ? 'heads' : 'tails';
-      // Force loss if house wins: if won=false, make result opposite of their pick
+      // Determine result
       const actualResult = won ? side : (side==='heads'?'tails':'heads');
       const emoji  = actualResult==='heads' ? '🟡' : '⚫';
 
@@ -1004,7 +1004,7 @@ client.on('interactionCreate', async interaction => {
           {name:'Bet',       value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
           {name:won?'Won':'Lost', value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
           {name:'Balance',   value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`, inline:true}
-        ).setFooter({text:bet>=500?'House odds: 80/20':'House odds: 70/30'})]});
+        ).setFooter({text:'Good luck! 🎲'})]});
     }
 
     if (cmd==='slots') {
@@ -1049,7 +1049,7 @@ client.on('interactionCreate', async interaction => {
           {name:'Bet',     value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
           {name:isWin?'Won':'Lost', value:`**${payout.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
           {name:'Balance', value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`, inline:true}
-        ).setFooter({text:bet>=500?'House odds: 80/20':'House odds: 70/30'})]});
+        ).setFooter({text:'Good luck! 🎲'})]});
     }
 
     if (cmd==='blackjack') {
@@ -1075,7 +1075,7 @@ client.on('interactionCreate', async interaction => {
       let playerHand = [drawCard(), drawCard()];
       let dealerHand = [drawCard(), drawCard()];
 
-      // Rig outcome toward house edge
+      // Determine dealer outcome
       // If supposed to lose: dealer draws until >= player total (up to 21), or player busts via extra card
       // If supposed to win: dealer busts or player stays comfortably above
 
@@ -1093,7 +1093,7 @@ client.on('interactionCreate', async interaction => {
           playerTotal = handTotal(playerHand);
         }
         if (playerTotal <= 21) {
-          // Dealer needs to beat player — rig dealer hand
+          // Dealer plays out hand
           while(handTotal(dealerHand) < playerTotal && handTotal(dealerHand) <= 21) {
             dealerHand.push(drawCard());
           }
@@ -1132,7 +1132,7 @@ client.on('interactionCreate', async interaction => {
           {name:'Bet',     value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
           {name:playerWins?'Won':push?'Returned':'Lost', value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
           {name:'Balance', value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`, inline:true}
-        ).setFooter({text:bet>=500?'House odds: 80/20':'House odds: 70/30'})]});
+        ).setFooter({text:'Good luck! 🎲'})]});
     }
 
     if (cmd==='doubleornothing') {
@@ -1159,7 +1159,7 @@ client.on('interactionCreate', async interaction => {
           {name:'Bet',     value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
           {name:won?'Won':'Lost', value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
           {name:'Balance', value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`, inline:true}
-        ).setFooter({text:bet>=500?'House odds: 80/20 — High roller detected 👀':'House odds: 70/30'})]});
+        ).setFooter({text:'Good luck! 🎲'})]});
     }
 
   } catch(e) {
