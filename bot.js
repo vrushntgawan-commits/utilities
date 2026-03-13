@@ -29,7 +29,7 @@ async function safeFetch(url, options = {}, retries = 3) {
 const STOCK_CHANNEL_ID = '1481026325178220565';
 const VOUCH_CHANNEL_ID = '1481321672970735807';
 const ALERT_CHANNEL_ID = '1480833457604268154';
-const GTN_CHANNEL_ID   = '1480823997498134540';
+const GTN_CHANNEL_ID   = '1482076857321914378';
 const DROP_CHANNEL_ID  = '1481582652430483579';
 const GUILD_ID         = (process.env.GUILD_ID   || '').trim();
 const JSONBIN_KEY      =  process.env.JSONBIN_KEY;
@@ -50,10 +50,15 @@ function isModerator(member) {
 // ══════════════════════════════════════════
 const PERMANENT_CODES = {
   'RELEASE': { coins: 25, description: '🎉 Launch reward' },
+  // LOOTDROP: special 1-claim mystery box, reset by admin each drop
 };
 
 const pendingVouches = new Map();
 const activeGTN = new Map();
+
+// ── Active Loot Drop state ──
+// { coins, claimedBy: null|userId }
+let activeLootDrop = null;
 
 const SHOP = [
   { id: 'robux_25',   name: '25 Robux',   cost: 100,  category: 'Robux', robuxAmt: 25  },
@@ -304,6 +309,7 @@ const slashDefs = [
     .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
   new SCB().setName('doubleornothing').setDescription('[ADMIN] Double your coins or lose them all').setDefaultMemberPermissions(PFB.Administrator)
     .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
+  new SCB().setName('lootdrop').setDescription('[ADMIN] Drop a mystery loot box (10–50 coins, first to claim wins)').setDefaultMemberPermissions(PFB.Administrator),
 ].map(c => c.toJSON());
 
 let coinWriteTimer = null;
@@ -485,6 +491,41 @@ async function cmdDaily(reply, userId, username) {
 
 async function cmdUseCode(reply, userId, username, codeInput) {
   const key  = codeInput.toUpperCase().trim();
+
+  // ── Special: LOOTDROP ──
+  if (key === 'LOOTDROP') {
+    if (!activeLootDrop || activeLootDrop.claimed)
+      return reply({ embeds:[errEmbed(activeLootDrop ? 'This Loot Drop has already been claimed by someone else!' : 'There is no active Loot Drop right now!')] });
+    // Mark claimed IMMEDIATELY before any await — prevents race conditions
+    activeLootDrop.claimed = true;
+    const won = activeLootDrop.coins;
+    const dropMsg = activeLootDrop.msg;
+    activeLootDrop = null; // fully gone
+    // Give coins
+    const u = await getUser(userId, username);
+    u.coins += won; u.totalEarned = (u.totalEarned||0)+won;
+    await saveUser(u);
+    // Edit the original drop message to show it's been claimed
+    if (dropMsg) {
+      try {
+        await dropMsg.edit({ embeds:[new EmbedBuilder()
+          .setColor(0xED4245)
+          .setTitle('📦 Loot Drop — CLAIMED!')
+          .setDescription(
+            `This loot drop has been claimed by **${username}**!\n\n` +
+            `🎁 They found **${won}** ${COIN_EMOJI} inside!\n\n` +
+            `~~Use \`u!use-code LOOTDROP\` or \`/use-code LOOTDROP\` to claim it!~~`
+          )
+          .setFooter({ text: 'Better luck next time!' })
+          .setTimestamp()] });
+      } catch(e) { console.error('Lootdrop edit error:', e.message); }
+    }
+    return reply({ embeds:[new EmbedBuilder()
+      .setColor(0xF1C40F)
+      .setTitle('📦 Loot Drop Claimed!')
+      .setDescription(`You opened the mystery box and found **${won}** ${COIN_EMOJI}!\n\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}\n\n🎉 You were first!`)] });
+  }
+
   const code = await getCode(key);
   if (!code) return reply({ embeds:[errEmbed(`Code \`${key}\` doesn't exist!`)] });
   if (code.expiresAt && Date.now() > code.expiresAt)
@@ -744,9 +785,9 @@ client.on('interactionCreate', async interaction => {
       if (await codeExists(code)) return reply({embeds:[errEmbed(`Code \`${code}\` already exists!`)]});
       const codeObj={coins, description:desc, multiUse:false};
       await saveCode(code, codeObj);
-      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎟️ Code Created & Saved!')
+      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎟️ Code Created!')
         .addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Description',value:desc,inline:true})
-        .setFooter({text:'✅ Saved to JSONBin — survives bot restarts!'})]});
+        .setFooter({text:'Code created successfully!'})]});
     }
 
     if (cmd==='drop-code') {
@@ -771,7 +812,7 @@ client.on('interactionCreate', async interaction => {
           try { await dropMsg.edit({content:'',embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🎟️ Code Expired!').setDescription(`The code drop has ended!\n\n**${redeemCount}** member(s) claimed **${coins}** ${COIN_EMOJI} each.\n\nStay active for future drops!`).setFooter({text:`Code was active for ${mins} minute(s)`})]}); } catch(e){console.error('Drop expire edit error:',e.message);}
         }
       },mins*60*1000);
-      return reply({embeds:[new EmbedBuilder().setColor(0xF1C40F).setTitle('🎟️ Code Dropped & Saved!').setDescription(`Code \`${code}\` is now live! Expires ${ts(expiresAt)}`).addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Expires',value:ts(expiresAt),inline:true}).setFooter({text:'✅ Saved to JSONBin — auto-deleted when expired'})]});
+      return reply({embeds:[new EmbedBuilder().setColor(0xF1C40F).setTitle('🎟️ Code Dropped!').setDescription(`Code \`${code}\` is now live! Expires ${ts(expiresAt)}`).addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Expires',value:ts(expiresAt),inline:true}).setFooter({text:'Code is live — auto-deleted when expired'})]});
     }
 
     if (cmd==='remove-code') {
@@ -899,6 +940,34 @@ client.on('interactionCreate', async interaction => {
         await interaction.guild.members.ban(t.id,{reason});
         return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🔨 User Banned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
       } catch(e){return reply({embeds:[errEmbed(`Failed to ban: ${e.message}`)]}); }
+    }
+
+    // ══════════════════════════════════════════
+    //  LOOT DROP
+    // ══════════════════════════════════════════
+    if (cmd==='lootdrop') {
+      if (activeLootDrop) return reply({embeds:[errEmbed('A Loot Drop is already active! Someone needs to claim it first.')],flags:MessageFlags.Ephemeral});
+      const coins = Math.floor(Math.random()*41)+10; // 10-50, secret until claimed
+      // Send the public embed and save the message reference so we can edit it later
+      let dropMsg = null;
+      try {
+        dropMsg = await interaction.channel.send({
+          embeds: [new EmbedBuilder()
+            .setColor(0xF1C40F)
+            .setTitle('📦 Loot Drop!')
+            .setDescription(
+              'A mystery loot box has appeared!\n\n' +
+              '🎁 **Unknown amount of coins inside...**\n\n' +
+              'Use `u!use-code LOOTDROP` or `/use-code LOOTDROP` to claim it!\n\n' +
+              '⚡ **First person to claim it wins — only 1 winner!**'
+            )
+            .setFooter({ text: 'Be fast — only one person can claim this!' })
+            .setTimestamp()]
+        });
+      } catch(e){ console.error('Lootdrop send error:', e.message); }
+      // Store state with message reference
+      activeLootDrop = { coins, claimed: false, msg: dropMsg };
+      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('📦 Loot Drop Created!').setDescription(`A loot drop with **${coins}** ${COIN_EMOJI} is now live!\n\nFirst to use \`LOOTDROP\` wins it.`).setFooter({text:'Only you can see the coin amount'})],flags:MessageFlags.Ephemeral});
     }
 
     // ══════════════════════════════════════════
