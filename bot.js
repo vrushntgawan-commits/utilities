@@ -60,6 +60,7 @@ function isModerator(member) {
 // ══════════════════════════════════════════
 const CODES = {
   'RELEASE': { coins: 25, description: '🎉 Launch reward' },
+  'FIX!': { coins: 10, description: '🎉 Launch reward' },
 };
 
 const pendingVouches = new Map();
