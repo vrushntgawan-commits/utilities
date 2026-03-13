@@ -294,6 +294,16 @@ const slashDefs = [
   new SCB().setName('ban').setDescription('[MOD] Ban a user').setDefaultMemberPermissions(PFB.BanMembers)
     .addUserOption(o=>o.setName('user').setDescription('User to ban').setRequired(true))
     .addStringOption(o=>o.setName('reason').setDescription('Reason').setRequired(false)),
+  // ── GAMBLING (admin only for now) ──
+  new SCB().setName('coinflip').setDescription('[ADMIN] Flip a coin and bet coins').setDefaultMemberPermissions(PFB.Administrator)
+    .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1))
+    .addStringOption(o=>o.setName('side').setDescription('Heads or Tails?').setRequired(true).addChoices({name:'Heads',value:'heads'},{name:'Tails',value:'tails'})),
+  new SCB().setName('slots').setDescription('[ADMIN] Spin the slot machine').setDefaultMemberPermissions(PFB.Administrator)
+    .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
+  new SCB().setName('blackjack').setDescription('[ADMIN] Play a hand of Blackjack').setDefaultMemberPermissions(PFB.Administrator)
+    .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
+  new SCB().setName('doubleornothing').setDescription('[ADMIN] Double your coins or lose them all').setDefaultMemberPermissions(PFB.Administrator)
+    .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
 ].map(c => c.toJSON());
 
 let coinWriteTimer = null;
@@ -889,6 +899,198 @@ client.on('interactionCreate', async interaction => {
         await interaction.guild.members.ban(t.id,{reason});
         return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🔨 User Banned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
       } catch(e){return reply({embeds:[errEmbed(`Failed to ban: ${e.message}`)]}); }
+    }
+
+    // ══════════════════════════════════════════
+    //  GAMBLING COMMANDS (admin only for now)
+    // ══════════════════════════════════════════
+
+    // ── Win chance: 30% normal, 20% if bet >= 500 ──
+    function gamblingWinChance(bet) { return bet >= 500 ? 0.20 : 0.30; }
+    function gamblingRoll(bet)      { return Math.random() < gamblingWinChance(bet); }
+
+    if (cmd==='coinflip') {
+      await interaction.deferReply();
+      const bet  = interaction.options.getInteger('bet');
+      const side = interaction.options.getString('side');
+      const u    = await getUser(me.id, me.username);
+      if (u.coins < bet) return interaction.editReply({embeds:[errEmbed(`You only have **${u.coins.toLocaleString()}** ${COIN_EMOJI}!`)]});
+
+      const won    = gamblingRoll(bet);
+      const result = Math.random() < 0.5 ? 'heads' : 'tails';
+      // Force loss if house wins: if won=false, make result opposite of their pick
+      const actualResult = won ? side : (side==='heads'?'tails':'heads');
+      const emoji  = actualResult==='heads' ? '🟡' : '⚫';
+
+      if (won) { u.coins += bet; u.totalEarned=(u.totalEarned||0)+bet; }
+      else      { u.coins = Math.max(0, u.coins - bet); }
+      await saveUser(u);
+
+      const color = won ? 0x57F287 : 0xED4245;
+      const title = won ? `${emoji} ${actualResult.toUpperCase()} — You Win!` : `${emoji} ${actualResult.toUpperCase()} — You Lose!`;
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(color).setTitle(`🪙 Coinflip — ${title}`)
+        .addFields(
+          {name:'Your Pick', value:side.charAt(0).toUpperCase()+side.slice(1), inline:true},
+          {name:'Result',    value:actualResult.charAt(0).toUpperCase()+actualResult.slice(1), inline:true},
+          {name:'Bet',       value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
+          {name:won?'Won':'Lost', value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
+          {name:'Balance',   value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`, inline:true}
+        ).setFooter({text:bet>=500?'House odds: 80/20':'House odds: 70/30'})]});
+    }
+
+    if (cmd==='slots') {
+      await interaction.deferReply();
+      const bet = interaction.options.getInteger('bet');
+      const u   = await getUser(me.id, me.username);
+      if (u.coins < bet) return interaction.editReply({embeds:[errEmbed(`You only have **${u.coins.toLocaleString()}** ${COIN_EMOJI}!`)]});
+
+      const SYMBOLS = ['🍒','🍋','🍊','🍇','⭐','💎','🎰'];
+      // Weight symbols so jackpot (💎💎💎) is very rare
+      const WEIGHTED = ['🍒','🍒','🍒','🍋','🍋','🍋','🍊','🍊','🍋','🍇','🍇','⭐','⭐','🎰','💎'];
+      function spin() { return WEIGHTED[Math.floor(Math.random()*WEIGHTED.length)]; }
+
+      const won = gamblingRoll(bet);
+      let reels;
+      if (won) {
+        // Win: give them two matching at least (but not jackpot unless very lucky)
+        const s = spin();
+        reels = Math.random() < 0.1 ? [s,s,s] : [s,s,spin()]; // 10% chance full match on a win
+        if (reels[2]===reels[0]) reels[2]=spin(); // prevent accidental jackpot on basic win
+      } else {
+        // Loss: guarantee no two consecutive match or only allow one pair max
+        reels = [spin(),spin(),spin()];
+        if (reels[0]===reels[1]&&reels[1]===reels[2]) reels[2]=SYMBOLS.find(s=>s!==reels[0])||'🍒';
+        if (reels[0]===reels[1]) reels[1]=SYMBOLS.find(s=>s!==reels[0])||'🍋';
+      }
+
+      const isJackpot = reels[0]===reels[1]&&reels[1]===reels[2];
+      const isWin     = isJackpot || won;
+      const multiplier = isJackpot ? 5 : 1;
+      const payout    = bet * multiplier;
+
+      if (isWin)  { u.coins += payout; u.totalEarned=(u.totalEarned||0)+payout; }
+      else         { u.coins = Math.max(0, u.coins - bet); }
+      await saveUser(u);
+
+      const color = isWin ? 0x57F287 : 0xED4245;
+      const resultText = isJackpot ? '🎉 **JACKPOT! 5x payout!**' : isWin ? '✅ **Winner!**' : '❌ **No match — You lose!**';
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(color).setTitle('🎰 Slot Machine')
+        .setDescription(`## ${reels.join(' │ ')}\n\n${resultText}`)
+        .addFields(
+          {name:'Bet',     value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
+          {name:isWin?'Won':'Lost', value:`**${payout.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
+          {name:'Balance', value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`, inline:true}
+        ).setFooter({text:bet>=500?'House odds: 80/20':'House odds: 70/30'})]});
+    }
+
+    if (cmd==='blackjack') {
+      await interaction.deferReply();
+      const bet = interaction.options.getInteger('bet');
+      const u   = await getUser(me.id, me.username);
+      if (u.coins < bet) return interaction.editReply({embeds:[errEmbed(`You only have **${u.coins.toLocaleString()}** ${COIN_EMOJI}!`)]});
+
+      const SUITS  = ['♠️','♥️','♦️','♣️'];
+      const VALUES = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+      function drawCard() { return {suit:SUITS[Math.floor(Math.random()*4)],val:VALUES[Math.floor(Math.random()*13)]}; }
+      function cardVal(c) { return ['J','Q','K'].includes(c.val)?10:c.val==='A'?11:parseInt(c.val); }
+      function handTotal(hand) {
+        let total=hand.reduce((s,c)=>s+cardVal(c),0), aces=hand.filter(c=>c.val==='A').length;
+        while(total>21&&aces>0){total-=10;aces--;}
+        return total;
+      }
+      function fmt(c){return `${c.val}${c.suit}`;}
+
+      const won = gamblingRoll(bet);
+
+      // Deal cards
+      let playerHand = [drawCard(), drawCard()];
+      let dealerHand = [drawCard(), drawCard()];
+
+      // Rig outcome toward house edge
+      // If supposed to lose: dealer draws until >= player total (up to 21), or player busts via extra card
+      // If supposed to win: dealer busts or player stays comfortably above
+
+      let playerTotal = handTotal(playerHand);
+      let dealerTotal = handTotal(dealerHand);
+
+      if (!won) {
+        // Make player lose: if player < 21, force dealer to have higher total or player bust
+        if (playerTotal < 17) {
+          // Player would normally hit — give them a bust card
+          const bustCard = drawCard();
+          // Force it to be a high card
+          bustCard.val = ['8','9','10','J','Q','K'][Math.floor(Math.random()*6)];
+          playerHand.push(bustCard);
+          playerTotal = handTotal(playerHand);
+        }
+        if (playerTotal <= 21) {
+          // Dealer needs to beat player — rig dealer hand
+          while(handTotal(dealerHand) < playerTotal && handTotal(dealerHand) <= 21) {
+            dealerHand.push(drawCard());
+          }
+        }
+        dealerTotal = handTotal(dealerHand);
+      } else {
+        // Player wins: dealer busts or stays low
+        while(dealerTotal < 17) { dealerHand.push(drawCard()); dealerTotal=handTotal(dealerHand); }
+        if (dealerTotal <= playerTotal && dealerTotal <= 21) {
+          // Make dealer bust
+          const bustCard = drawCard();
+          bustCard.val = ['8','9','10'][Math.floor(Math.random()*3)];
+          dealerHand.push(bustCard);
+          dealerTotal = handTotal(dealerHand);
+        }
+      }
+
+      const playerBust = playerTotal > 21;
+      const dealerBust = dealerTotal > 21;
+      const playerWins = !playerBust && (dealerBust || playerTotal > dealerTotal);
+      const push       = !playerBust && !dealerBust && playerTotal === dealerTotal;
+
+      if (playerWins)   { u.coins += bet; u.totalEarned=(u.totalEarned||0)+bet; }
+      else if (!push)   { u.coins = Math.max(0, u.coins - bet); }
+      await saveUser(u);
+
+      const color  = playerWins ? 0x57F287 : push ? 0xFEE75C : 0xED4245;
+      const result = playerWins ? '🃏 **You win!**' : push ? '🤝 **Push — bet returned!**' : playerBust ? '💥 **Bust! You lose!**' : '🏦 **Dealer wins!**';
+
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(color).setTitle('🃏 Blackjack')
+        .addFields(
+          {name:`Your Hand (${playerTotal})`,   value:playerHand.map(fmt).join(' '), inline:true},
+          {name:`Dealer Hand (${dealerTotal})`, value:dealerHand.map(fmt).join(' '), inline:true},
+          {name:'\u200b', value:'\u200b', inline:true},
+          {name:'Result',  value:result, inline:false},
+          {name:'Bet',     value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
+          {name:playerWins?'Won':push?'Returned':'Lost', value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
+          {name:'Balance', value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`, inline:true}
+        ).setFooter({text:bet>=500?'House odds: 80/20':'House odds: 70/30'})]});
+    }
+
+    if (cmd==='doubleornothing') {
+      await interaction.deferReply();
+      const bet = interaction.options.getInteger('bet');
+      const u   = await getUser(me.id, me.username);
+      if (u.coins < bet) return interaction.editReply({embeds:[errEmbed(`You only have **${u.coins.toLocaleString()}** ${COIN_EMOJI}!`)]});
+
+      const won = gamblingRoll(bet);
+      // Dramatic number reveal
+      const roll     = won ? Math.floor(Math.random()*50)+51 : Math.floor(Math.random()*50)+1; // 51-100 = win, 1-50 = lose
+      const THRESHOLD = 50;
+
+      if (won)  { u.coins += bet; u.totalEarned=(u.totalEarned||0)+bet; }
+      else       { u.coins = Math.max(0, u.coins - bet); }
+      await saveUser(u);
+
+      const color = won ? 0x57F287 : 0xED4245;
+      const bar   = won ? '🟩'.repeat(Math.round(roll/10)) : '🟥'.repeat(Math.round(roll/10));
+
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(color).setTitle('⚡ Double or Nothing')
+        .setDescription(`The die was cast...\n\n## ${roll} / 100\n${bar}\n\n${won?`🎉 **DOUBLED!** You needed > ${THRESHOLD}, rolled **${roll}**!`:`💀 **NOTHING!** You needed > ${THRESHOLD}, rolled **${roll}**.`}`)
+        .addFields(
+          {name:'Bet',     value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
+          {name:won?'Won':'Lost', value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`, inline:true},
+          {name:'Balance', value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`, inline:true}
+        ).setFooter({text:bet>=500?'House odds: 80/20 — High roller detected 👀':'House odds: 70/30'})]});
     }
 
   } catch(e) {
