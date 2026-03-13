@@ -193,8 +193,8 @@ async function getStore()    { return dbRead('store'); }
 async function saveStore(s)  { await dbWrite('store', s); }
 async function getMeta()     { return dbRead('meta'); }
 async function saveMeta(m)   { await dbWrite('meta', m); }
-async function getClaims()   { return dbRead('claims'); }
-async function saveClaims(c) { await dbWrite('claims', c); }
+async function getClaims()   { cacheTime.claims = 0; return dbRead('claims'); } // always read fresh
+async function saveClaims(c) { await dbWrite('claims', c); cacheTime.claims = 0; } // always bust cache after write
 async function getWarns(uid) { const w = await dbRead('warns'); return w[uid] || []; }
 async function saveWarns(uid, arr) { const w = await dbRead('warns'); w[uid] = arr; await dbWrite('warns', w); }
 async function nextClaimId() {
@@ -808,7 +808,8 @@ client.on('interactionCreate', async interaction => {
       if (arr[idx].status==='fulfilled') return interaction.editReply({embeds:[errEmbed('Already fulfilled.')]});
       if (arr[idx].status==='denied')    return interaction.editReply({embeds:[errEmbed('Already denied.')]});
       const claim=arr[idx];
-      arr[idx].status='fulfilled'; arr[idx].fulfilledAt=Date.now(); arr[idx].fulfilledBy=me.username;
+      // Remove from claims array entirely — fulfilled claims don't need to stay
+      arr.splice(idx, 1);
       await saveClaims(arr);
       let dmSent=false;
       try {
@@ -843,8 +844,8 @@ client.on('interactionCreate', async interaction => {
       if (arr[idx].status==='fulfilled') return interaction.editReply({embeds:[errEmbed('Already fulfilled.')]});
       if (arr[idx].status==='denied')    return interaction.editReply({embeds:[errEmbed('Already denied.')]});
       const claim=arr[idx];
-      arr[idx].status='denied'; arr[idx].deniedAt=Date.now(); arr[idx].deniedBy=me.username;
-      if (reason) arr[idx].deniedReason=reason;
+      // Remove from claims array entirely — no point keeping denied claims
+      arr.splice(idx, 1);
       await saveClaims(arr);
       const shopItem=SHOP.find(i=>i.id===claim.itemId);
       const u=await getUser(claim.userId,claim.username);
