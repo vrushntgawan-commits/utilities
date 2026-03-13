@@ -41,7 +41,6 @@ const BOT_TOKEN        =  process.env.BOT_TOKEN;
 const COIN_EMOJI       = '<:CoinEmoji:1481246827448766526>';
 const ROBUX_EMOJI      = '<:robux:1481247240914731109>';
 const PREFIX               = 'u!';
-const BLOCKED_CMD_CHANNEL  = '1480823997498134540'; // Commands are NOT allowed in this channel
 
 // ── Moderator role detection ──
 // Any role whose name contains one of these keywords (case-insensitive) counts as a mod
@@ -493,38 +492,6 @@ client.on('messageCreate', async msg => {
       saveUser(u).catch(() => {});
     }).catch(() => {});
   }
-
-  // Bot command detection — timeout non-admins for 30s if they use bot commands (/ or prefix)
-  const isAdminMember = msg.member?.permissions.has(PermissionFlagsBits.Administrator);
-  if (!isAdminMember) {
-    const isBotCmd = msg.content.startsWith('/') ||
-      (msg.content.startsWith(PREFIX) && msg.content.length > PREFIX.length);
-    if (isBotCmd) {
-      try {
-        // Timeout for 30 seconds
-        await msg.member.timeout(30 * 1000, 'Used bot commands in chat');
-        // Delete the message
-        try { await msg.delete(); } catch {}
-        // DM the user
-        try {
-          await msg.author.send({ embeds: [new EmbedBuilder()
-            .setColor(0xED4245)
-            .setTitle('⛔ Bot Commands Disabled!')
-            .setDescription(
-              `You were timed out for **30 seconds** for using bot commands in <#${msg.channel.id}>.
-
-` +
-              `Please use bot commands in the correct channel or via slash commands only.
-
-` +
-              `You will be automatically un-timed out after 30 seconds.`
-            )] });
-        } catch {}
-        return;
-      } catch {}
-    }
-  }
-
   // Prefix commands
   if (!msg.content.startsWith(PREFIX)) return;
   const args    = msg.content.slice(PREFIX.length).trim().split(/\s+/);
@@ -832,34 +799,6 @@ client.on('interactionCreate', async interaction => {
   const cmd   = interaction.commandName;
   const me    = interaction.user;
   const reply = p => interaction.reply(p);
-
-  // Block bot commands ONLY in the GTN channel — timeout 30s (mods/admins exempt)
-  const NON_ADMIN_CMDS = ['balance','daily','shop','inventory','leaderboard','help','use-code','redeem','claim'];
-  const inBlockedChannel = interaction.channel && interaction.channel.id === BLOCKED_CMD_CHANNEL;
-  console.log(`CMD: /${cmd} | Channel: ${interaction.channel?.id} | Blocked: ${inBlockedChannel}`);
-  if (NON_ADMIN_CMDS.includes(cmd) && inBlockedChannel) {
-    const member = await interaction.guild.members.fetch(me.id).catch(() => null);
-    if (member && !isModerator(member)) {
-      console.log(`Timing out ${me.username} for using /${cmd} in blocked channel`);
-      try { await member.timeout(30 * 1000, 'Bot commands not allowed in this channel'); } catch {}
-      try {
-        await me.send({ embeds: [new EmbedBuilder()
-          .setColor(0xED4245)
-          .setTitle('⚠️ Wrong Channel!')
-          .setDescription(
-            `You cannot use bot commands in <#${BLOCKED_CMD_CHANNEL}>!\n\n` +
-            `Please use bot commands in any other channel.\n\n` +
-            `You have been timed out for **30 seconds**.`
-          )] });
-      } catch {}
-      return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setColor(0xED4245)
-          .setDescription(`❌ You cannot use bot commands in this channel! You have been timed out for 30 seconds.`)],
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-  }
 
   try {
     if (cmd === 'balance')     return await cmdBalance(reply, interaction.options.getUser('user') || me);
