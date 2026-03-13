@@ -31,6 +31,7 @@ const VOUCH_CHANNEL_ID = '1481321672970735807';
 const ALERT_CHANNEL_ID = '1480833457604268154';
 const GTN_CHANNEL_ID   = '1482076857321914378';
 const DROP_CHANNEL_ID  = '1481582652430483579';
+const LOG_CHANNEL_ID   = '1482112291750150214';
 const GUILD_ID         = (process.env.GUILD_ID   || '').trim();
 const JSONBIN_KEY      =  process.env.JSONBIN_KEY;
 const BOT_TOKEN        =  process.env.BOT_TOKEN;
@@ -209,6 +210,25 @@ function ts(unixMs, style='R') { return `<t:${Math.floor(unixMs/1000)}:${style}>
 function errEmbed(text) { return new EmbedBuilder().setColor(0xED4245).setDescription(`❌ ${text}`); }
 function okEmbed(text)  { return new EmbedBuilder().setColor(0x57F287).setDescription(`✅ ${text}`); }
 
+
+// ══════════════════════════════════════════
+//  LOG HELPER
+// ══════════════════════════════════════════
+async function sendLog(clientRef, fields) {
+  try {
+    const ch = await clientRef.channels.fetch(LOG_CHANNEL_ID);
+    if (!ch) return;
+    const embed = new EmbedBuilder()
+      .setColor(fields.color || 0x5865F2)
+      .setTitle(fields.title || '📋 Log')
+      .setTimestamp();
+    if (fields.description) embed.setDescription(fields.description);
+    if (fields.fields) embed.addFields(...fields.fields);
+    if (fields.user) embed.setFooter({ text: `User: ${fields.user}` });
+    await ch.send({ embeds: [embed] });
+  } catch(e) { console.error('Log send error:', e.message); }
+}
+
 function stockEmbed(store) {
   return new EmbedBuilder().setTitle('🏪 Current Stock').setColor(0x5865F2)
     .setDescription('Use `/shop` to see prices and `/redeem` to purchase!')
@@ -368,6 +388,17 @@ client.once('ready', async () => {
     } catch (e) { console.error('Slash command registration failed:', e.message); }
   }
   try { await dbRead('users'); console.log('✅ Cache warmed'); } catch (e) { console.error('Cache warmup error:', e.message); }
+  // Purge any old denied/fulfilled claims left over from before the fix
+  try {
+    const allClaims = await getClaims();
+    const cleaned = (Array.isArray(allClaims) ? allClaims : []).filter(c => c.status === 'pending');
+    if (cleaned.length !== allClaims.length) {
+      await saveClaims(cleaned);
+      console.log(`✅ Purged ${allClaims.length - cleaned.length} old non-pending claim(s) from JSONBin`);
+    } else {
+      console.log('✅ Claims bin is clean');
+    }
+  } catch (e) { console.error('Claims purge error:', e.message); }
   // Warm codes cache & log how many saved codes exist
   try {
     const codes = await dbRead('codes');
@@ -407,6 +438,7 @@ client.on('messageCreate', async msg => {
         const winner = await getUser(msg.author.id, msg.author.username);
         winner.coins += game.prize; winner.totalEarned = (winner.totalEarned||0)+game.prize;
         await saveUser(winner);
+        sendLog(client,{title:'🎮 GTN Winner!',color:0xF1C40F,fields:[{name:'Winner',value:`<@${msg.author.id}>`,inline:true},{name:'Answer',value:`**${game.answer}**`,inline:true},{name:'Prize',value:`**${game.prize}** ${COIN_EMOJI}`,inline:true},{name:'New Balance',value:`**${winner.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
         try { await msg.channel.send({ embeds:[new EmbedBuilder().setColor(0xF1C40F).setTitle('🎉 We Have a Winner!').setDescription(`<@${msg.author.id}> guessed the number **${game.answer}** correctly! 🏆\n\n**Prize:** **${game.prize}** ${COIN_EMOJI}\n**New balance:** **${winner.coins.toLocaleString()}** ${COIN_EMOJI}`).setFooter({text:`Range was ${game.min}–${game.max}`}).setTimestamp()] }); } catch {}
         return;
       } else if (guess >= game.min && guess <= game.max) {
@@ -489,6 +521,7 @@ async function cmdDaily(reply, userId, username) {
   const earned=Math.floor(Math.random()*6)+10;
   u.coins+=earned; u.totalEarned=(u.totalEarned||0)+earned; u.lastDaily=now;
   await saveUser(u);
+  sendLog(client,{title:'🎁 Daily Claimed',color:0x57F287,fields:[{name:'User',value:`<@${userId}>`,inline:true},{name:'Reward',value:`+**${earned}** ${COIN_EMOJI}`,inline:true},{name:'Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
   return reply({ embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎁 Daily Claimed!').setDescription(`You received **${earned}** ${COIN_EMOJI}!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`).setFooter({text:'Next daily available'}).setTimestamp(now+cd)] });
 }
 
@@ -523,6 +556,7 @@ async function cmdUseCode(reply, userId, username, codeInput) {
           .setTimestamp()] });
       } catch(e) { console.error('Lootdrop edit error:', e.message); }
     }
+    sendLog(client,{title:'📦 Loot Drop Claimed!',color:0xF1C40F,fields:[{name:'Winner',value:`<@${userId}>`,inline:true},{name:'Coins Won',value:`**${won}** ${COIN_EMOJI}`,inline:true},{name:'New Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
     return reply({ embeds:[new EmbedBuilder()
       .setColor(0xF1C40F)
       .setTitle('📦 Loot Drop Claimed!')
@@ -550,6 +584,7 @@ async function cmdUseCode(reply, userId, username, codeInput) {
   }
   u.coins += code.coins; u.totalEarned = (u.totalEarned||0)+code.coins;
   await saveUser(u);
+  sendLog(client,{title:'🎟️ Code Redeemed',color:0x57F287,fields:[{name:'User',value:`<@${userId}>`,inline:true},{name:'Code',value:`\`${key}\``,inline:true},{name:'Coins',value:`+**${code.coins}** ${COIN_EMOJI}`,inline:true},{name:'Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
   return reply({ embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎟️ Code Redeemed!').setDescription(`${code.description}\nYou received **${code.coins}** ${COIN_EMOJI}!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}${code.expiresAt?`\nCode expires ${ts(code.expiresAt)}`:''}`)] });
 }
 
@@ -614,6 +649,7 @@ async function cmdRedeem(reply, userId, username, itemId) {
   u.coins-=item.cost;
   u.inventory.push({claimId,itemId:item.id,name:item.name,category:item.category,robuxAmt:item.robuxAmt,cost:item.cost});
   await saveUser(u);
+  sendLog(client,{title:'🛒 Item Redeemed',color:0x9B59B6,fields:[{name:'User',value:`<@${userId}>`,inline:true},{name:'Item',value:item.name,inline:true},{name:'Cost',value:`**${item.cost}** ${COIN_EMOJI}`,inline:true},{name:'Claim ID',value:`\`${claimId}\``,inline:true},{name:'Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
   return reply({ embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎒 Added to Inventory!').setDescription(`**${item.name}** is now in your inventory!\nBalance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}\n\n📬 Claim ID: \`${claimId}\`\nUse \`/claim ${claimId}\` to submit!`)] });
 }
 
@@ -622,6 +658,7 @@ async function cmdRain(msgOrInteraction, guild, senderId, senderName, amount) {
   const sender=await getUser(senderId,senderName);
   const errR=t=>{const e=errEmbed(t);return isInt?msgOrInteraction.editReply({embeds:[e]}):msgOrInteraction.reply({embeds:[e]});};
   if (sender.coins<amount) return errR(`You only have **${sender.coins}** ${COIN_EMOJI}!`);
+  sendLog(client,{title:'🌧️ Coin Rain Started',color:0x3498DB,fields:[{name:'Admin',value:`<@${senderId}>`,inline:true},{name:'Amount',value:`**${amount}** ${COIN_EMOJI}`,inline:true},{name:'Duration',value:'2 minutes',inline:true}]});
   const endsAt=Date.now()+2*60*1000;
   const rainEmbed=new EmbedBuilder().setColor(0x3498DB).setTitle('🌧️ Coin Rain — React to Enter!').setDescription(`<@${senderId}> is raining **${amount}** ${COIN_EMOJI}!\n\nReact with 🌧️ to enter!\nCoins split equally.\n\n⏰ Ends ${ts(endsAt)} (${ts(endsAt,'T')} your time)`);
   let rainMsg;
@@ -640,6 +677,7 @@ async function cmdRain(msgOrInteraction, guild, senderId, senderName, amount) {
       const su=await getUser(senderId,senderName); su.coins=Math.max(0,su.coins-totalGiven); await saveUser(su);
       const names=[];
       for (const r of reactors) { const u=await getUser(r.id,r.username); u.coins+=per; u.totalEarned=(u.totalEarned||0)+per; await saveUser(u); names.push(`<@${r.id}>`); }
+      sendLog(client,{title:'🌧️ Rain Finished',color:0x57F287,fields:[{name:'Sender',value:`<@${senderId}>`,inline:true},{name:'Total Paid',value:`**${totalGiven}** ${COIN_EMOJI}`,inline:true},{name:'Winners',value:`${reactors.length} members`,inline:true},{name:'Per Person',value:`**${per}** ${COIN_EMOJI}`,inline:true}]});
       await rainMsg.reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🌧️ Rain Finished!').setDescription(`<@${senderId}> rained **${totalGiven}** ${COIN_EMOJI} across **${reactors.length}** members!\nEach got **${per}** ${COIN_EMOJI}\n\n**Winners:** ${names.join(' ')}`)]});
     } catch(e){console.error('Rain end error:',e.message);}
   },2*60*1000);
@@ -757,6 +795,7 @@ client.on('interactionCreate', async interaction => {
     const claims=await getClaims(), claimsArr=Array.isArray(claims)?claims:[];
     claimsArr.push({claimId,userId:interaction.user.id,username:interaction.user.username,itemId:item.itemId||item.id,itemName:item.name,category:item.category,robuxAmt:item.robuxAmt||0,robloxUsername:robloxUser,gamepassLink:gamepassLink||null,claimedAt:Date.now(),status:'pending'});
     await saveClaims(claimsArr);
+    sendLog(client,{title:'📋 Claim Submitted',color:0x5865F2,fields:[{name:'User',value:`<@${interaction.user.id}>`,inline:true},{name:'Claim ID',value:`\`${claimId}\``,inline:true},{name:'Item',value:item.name,inline:true},{name:'Roblox Username',value:robloxUser,inline:true},{name:'Category',value:item.category,inline:true}]});
     u.inventory.splice(idx,1); await saveUser(u);
     return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('📬 Claim Submitted!').setDescription(`Your claim for **${item.name}** has been submitted!\n\n**Claim ID:** \`${claimId}\`\n**Roblox:** \`${robloxUser}\`\n${gamepassLink?`**Gamepass:** ${gamepassLink}\n`:''}\nAn admin will process this shortly!`)]});
   }
@@ -811,6 +850,7 @@ client.on('interactionCreate', async interaction => {
       // Remove from claims array entirely — fulfilled claims don't need to stay
       arr.splice(idx, 1);
       await saveClaims(arr);
+      sendLog(client,{title:'✅ Claim Fulfilled',color:0x57F287,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Claim ID',value:`\`${claimId}\``,inline:true},{name:'User',value:`<@${claim.userId}>`,inline:true},{name:'Item',value:claim.itemName,inline:true}]});
       let dmSent=false;
       try {
         const t=await client.users.fetch(claim.userId);
@@ -844,9 +884,10 @@ client.on('interactionCreate', async interaction => {
       if (arr[idx].status==='fulfilled') return interaction.editReply({embeds:[errEmbed('Already fulfilled.')]});
       if (arr[idx].status==='denied')    return interaction.editReply({embeds:[errEmbed('Already denied.')]});
       const claim=arr[idx];
-      // Remove from claims array entirely — no point keeping denied claims
+      // Remove from claims array — denied
       arr.splice(idx, 1);
       await saveClaims(arr);
+      sendLog(client,{title:'❌ Claim Denied',color:0xED4245,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Claim ID',value:`\`${claimId}\``,inline:true},{name:'User',value:`<@${claim.userId}>`,inline:true},{name:'Item',value:claim.itemName,inline:true},{name:'Reason',value:reason||'No reason given',inline:false}]});
       const shopItem=SHOP.find(i=>i.id===claim.itemId);
       const u=await getUser(claim.userId,claim.username);
       u.inventory.push({claimId:claim.claimId,itemId:claim.itemId,name:claim.itemName,category:claim.category,robuxAmt:claim.robuxAmt||0,cost:shopItem?shopItem.cost:0});
@@ -868,11 +909,13 @@ client.on('interactionCreate', async interaction => {
     if (cmd==='give') {
       const t=interaction.options.getUser('user'), amt=interaction.options.getInteger('amount');
       const u=await getUser(t.id,t.username); u.coins+=amt; u.totalEarned=(u.totalEarned||0)+amt; await saveUser(u);
+      sendLog(client,{title:'💰 Coins Given',color:0x57F287,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Recipient',value:`<@${t.id}>`,inline:true},{name:'Amount',value:`+**${amt}** ${COIN_EMOJI}`,inline:true},{name:'New Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
       return reply({embeds:[okEmbed(`Gave **${amt}** ${COIN_EMOJI} to <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)]});
     }
     if (cmd==='take') {
       const t=interaction.options.getUser('user'), amt=interaction.options.getInteger('amount');
       const u=await getUser(t.id,t.username); u.coins=Math.max(0,u.coins-amt); await saveUser(u);
+      sendLog(client,{title:'💸 Coins Taken',color:0xED4245,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'From',value:`<@${t.id}>`,inline:true},{name:'Amount',value:`-**${amt}** ${COIN_EMOJI}`,inline:true},{name:'New Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
       return reply({embeds:[okEmbed(`Took **${amt}** ${COIN_EMOJI} from <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)]});
     }
 
@@ -884,6 +927,7 @@ client.on('interactionCreate', async interaction => {
       if (await codeExists(code)) return reply({embeds:[errEmbed(`Code \`${code}\` already exists!`)]});
       const codeObj={coins, description:desc, multiUse:false};
       await saveCode(code, codeObj);
+      sendLog(client,{title:'🎟️ Code Created',color:0x57F287,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Type',value:'One-time',inline:true}],user:me.username});
       return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎟️ Code Created!')
         .addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Description',value:desc,inline:true})
         .setFooter({text:'Code created successfully!'})]});
@@ -911,6 +955,7 @@ client.on('interactionCreate', async interaction => {
           try { await dropMsg.edit({content:'',embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🎟️ Code Expired!').setDescription(`The code drop has ended!\n\n**${redeemCount}** member(s) claimed **${coins}** ${COIN_EMOJI} each.\n\nStay active for future drops!`).setFooter({text:`Code was active for ${mins} minute(s)`})]}); } catch(e){console.error('Drop expire edit error:',e.message);}
         }
       },mins*60*1000);
+      sendLog(client,{title:'🎟️ Code Dropped',color:0xF1C40F,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Expires',value:ts(expiresAt),inline:true},{name:'Type',value:'Multi-use timed',inline:true}],user:me.username});
       return reply({embeds:[new EmbedBuilder().setColor(0xF1C40F).setTitle('🎟️ Code Dropped!').setDescription(`Code \`${code}\` is now live! Expires ${ts(expiresAt)}`).addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Coins',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Expires',value:ts(expiresAt),inline:true}).setFooter({text:'Code is live — auto-deleted when expired'})]});
     }
 
@@ -922,6 +967,7 @@ client.on('interactionCreate', async interaction => {
       const {coins, redeemedBy}=all[code];
       const redeemCount=(redeemedBy||[]).length;
       await deleteCode(code);
+      sendLog(client,{title:'🗑️ Code Removed',color:0xED4245,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Code',value:`\`${code}\``,inline:true},{name:'Times Redeemed',value:`${redeemCount}`,inline:true}],user:me.username});
       return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🗑️ Code Removed').setDescription(`Code \`${code}\` has been deleted from the database.`).addFields({name:'Code',value:`\`${code}\``,inline:true},{name:'Redeemed',value:`${redeemCount} time(s)`,inline:true},{name:'Coins/use',value:`**${coins}** ${COIN_EMOJI}`,inline:true})]});
     }
 
@@ -944,6 +990,7 @@ client.on('interactionCreate', async interaction => {
       const u=await getUser(t.id,t.username), idx=(u.inventory||[]).findIndex(i=>i.claimId===claimId);
       if (idx===-1) return reply({embeds:[errEmbed(`No item \`${claimId}\` in <@${t.id}>'s inventory.`)],flags:MessageFlags.Ephemeral});
       const removed=u.inventory.splice(idx,1)[0]; await saveUser(u);
+      sendLog(client,{title:'🗑️ Inventory Item Removed',color:0xED4245,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'User',value:`<@${t.id}>`,inline:true},{name:'Item',value:`${removed.name} (\`${claimId}\`)`,inline:true}],user:me.username});
       return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🗑️ Removed').setDescription(`Removed **${removed.name}** (\`${claimId}\`) from <@${t.id}>'s inventory.`)]});
     }
     if (cmd==='check-inventory') {
@@ -955,12 +1002,14 @@ client.on('interactionCreate', async interaction => {
     if (cmd==='update-robux') {
       await interaction.deferReply();
       const store=await getStore(); store.robux=interaction.options.getInteger('amount'); await saveStore(store); await updateStockEmbed(client);
+      sendLog(client,{title:'📦 Robux Stock Updated',color:0x57F287,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'New Amount',value:`**${store.robux}** Robux`,inline:true}],user:me.username});
       return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Stock Updated').setDescription(`💎 Robux set to **${store.robux}**.`)]});
     }
     if (cmd==='update-etfb') {
       await interaction.deferReply();
       const type=interaction.options.getString('type'), amt=interaction.options.getInteger('amount');
       const store=await getStore(); store[type]=amt; await saveStore(store); await updateStockEmbed(client);
+      sendLog(client,{title:'📦 ETFB Stock Updated',color:0x57F287,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Type',value:type==='divines'?'Divines':'Celestials',inline:true},{name:'New Amount',value:`**${amt}x**`,inline:true}],user:me.username});
       return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Stock Updated').setDescription(`${type==='divines'?'🌟 Divines':'✨ Celestials'} set to **${amt}x**.`)]});
     }
 
@@ -974,6 +1023,7 @@ client.on('interactionCreate', async interaction => {
         const gtnCh=await client.channels.fetch(GTN_CHANNEL_ID);
         if(gtnCh) await gtnCh.send({embeds:[new EmbedBuilder().setColor(0x9B59B6).setTitle('🎮 Guess the Number!').setDescription(`A new game has started!\n\n> 🔢 **Range:** ${min} – ${max}\n> 🏆 **Prize:** **${prize}** ${COIN_EMOJI}\n\nType a number in this channel to guess!\nFirst correct guess wins!`).setFooter({text:`Hosted by ${me.username}`}).setTimestamp()]});
       } catch(e){console.error('GTN channel send error:',e.message);}
+      sendLog(client,{title:'🎮 GTN Game Started',color:0x9B59B6,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Range',value:`${min}–${max}`,inline:true},{name:'Answer',value:`||${answer}||`,inline:true},{name:'Prize',value:`**${prize}** ${COIN_EMOJI}`,inline:true}],user:me.username});
       return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ GTN Game Started!').addFields({name:'Range',value:`${min} – ${max}`,inline:true},{name:'Answer',value:`**${answer}**`,inline:true},{name:'Prize',value:`**${prize}** ${COIN_EMOJI}`,inline:true}).setFooter({text:'Only you can see this'})],flags:MessageFlags.Ephemeral});
     }
 
@@ -985,6 +1035,7 @@ client.on('interactionCreate', async interaction => {
         const member=await interaction.guild.members.fetch(t.id);
         await member.timeout(mins*60*1000, reason);
         try { await t.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⏱️ You have been timed out').addFields({name:'Duration',value:`${mins} minute(s)`,inline:true},{name:'Reason',value:reason,inline:true},{name:'Server',value:interaction.guild.name,inline:true})]}); } catch {}
+        sendLog(client,{title:'⏱️ User Timed Out',color:0xED4245,fields:[{name:'Mod',value:`<@${me.id}>`,inline:true},{name:'User',value:`<@${t.id}>`,inline:true},{name:'Duration',value:`${mins} min`,inline:true},{name:'Reason',value:reason,inline:false}],user:me.username});
         return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⏱️ User Timed Out').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Duration',value:`${mins} min`,inline:true},{name:'Reason',value:reason,inline:false})]});
       } catch(e){return reply({embeds:[errEmbed(`Failed to timeout: ${e.message}`)]}); }
     }
@@ -995,6 +1046,7 @@ client.on('interactionCreate', async interaction => {
         const member=await interaction.guild.members.fetch(t.id);
         await member.timeout(null, reason);
         try { await t.send({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Timeout Removed').setDescription(`Your timeout in **${interaction.guild.name}** has been removed.\n**Reason:** ${reason}`)]}); } catch {}
+        sendLog(client,{title:'✅ Timeout Removed',color:0x57F287,fields:[{name:'Mod',value:`<@${me.id}>`,inline:true},{name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false}],user:me.username});
         return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Timeout Removed').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
       } catch(e){return reply({embeds:[errEmbed(`Failed to untimeout: ${e.message}`)]}); }
     }
@@ -1003,6 +1055,7 @@ client.on('interactionCreate', async interaction => {
       const t=interaction.options.getUser('user'), reason=interaction.options.getString('reason')||'No reason given';
       const warns=await getWarns(t.id); warns.push({reason,by:me.username,at:Date.now()}); await saveWarns(t.id,warns);
       try { await t.send({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ You have been warned').addFields({name:'Reason',value:reason,inline:false},{name:'Total Warns',value:`${warns.length}`,inline:true},{name:'Server',value:interaction.guild.name,inline:true})]}); } catch {}
+      sendLog(client,{title:'⚠️ User Warned',color:0xFEE75C,fields:[{name:'Mod',value:`<@${me.id}>`,inline:true},{name:'User',value:`<@${t.id}>`,inline:true},{name:'Warn #',value:`${warns.length}`,inline:true},{name:'Reason',value:reason,inline:false}],user:me.username});
       return reply({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ User Warned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Warn #',value:`${warns.length}`,inline:true},{name:'Reason',value:reason,inline:false})]});
     }
     if (cmd==='unwarn') {
@@ -1012,6 +1065,7 @@ client.on('interactionCreate', async interaction => {
       if (!warns.length) return reply({embeds:[errEmbed(`<@${t.id}> has no warns.`)]});
       if (index<0||index>=warns.length) return reply({embeds:[errEmbed('Invalid warn number. Use /warns to see the list.')]});
       const removed=warns.splice(index,1)[0]; await saveWarns(t.id,warns);
+      sendLog(client,{title:'✅ Warn Removed',color:0x57F287,fields:[{name:'Mod',value:`<@${me.id}>`,inline:true},{name:'User',value:`<@${t.id}>`,inline:true},{name:'Removed Warn',value:removed.reason,inline:false},{name:'Remaining',value:`${warns.length} warn(s)`,inline:true}],user:me.username});
       return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Warn Removed').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Removed Warn',value:removed.reason,inline:false},{name:'Remaining Warns',value:`${warns.length}`,inline:true})]});
     }
     if (cmd==='warns') {
@@ -1028,6 +1082,7 @@ client.on('interactionCreate', async interaction => {
         const member=await interaction.guild.members.fetch(t.id);
         try { await t.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('👢 You have been kicked').addFields({name:'Reason',value:reason,inline:false},{name:'Server',value:interaction.guild.name,inline:true})]}); } catch {}
         await member.kick(reason);
+        sendLog(client,{title:'👢 User Kicked',color:0xED4245,fields:[{name:'Mod',value:`<@${me.id}>`,inline:true},{name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false}],user:me.username});
         return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('👢 User Kicked').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
       } catch(e){return reply({embeds:[errEmbed(`Failed to kick: ${e.message}`)]}); }
     }
@@ -1037,6 +1092,7 @@ client.on('interactionCreate', async interaction => {
       try {
         try { await t.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🔨 You have been banned').addFields({name:'Reason',value:reason,inline:false},{name:'Server',value:interaction.guild.name,inline:true})]}); } catch {}
         await interaction.guild.members.ban(t.id,{reason});
+        sendLog(client,{title:'🔨 User Banned',color:0xED4245,fields:[{name:'Mod',value:`<@${me.id}>`,inline:true},{name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false}],user:me.username});
         return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🔨 User Banned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
       } catch(e){return reply({embeds:[errEmbed(`Failed to ban: ${e.message}`)]}); }
     }
@@ -1066,6 +1122,7 @@ client.on('interactionCreate', async interaction => {
       } catch(e){ console.error('Lootdrop send error:', e.message); }
       // Store state with message reference
       activeLootDrop = { coins, claimed: false, msg: dropMsg };
+      sendLog(client,{title:'📦 Loot Drop Started',color:0xF1C40F,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'Coins Inside',value:`**${coins}** ${COIN_EMOJI}`,inline:true},{name:'Status',value:'🟢 Active — awaiting claim',inline:true}],user:me.username});
       return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('📦 Loot Drop Created!').setDescription(`A loot drop with **${coins}** ${COIN_EMOJI} is now live!\n\nFirst to use \`LOOTDROP\` wins it.`).setFooter({text:'Only you can see the coin amount'})],flags:MessageFlags.Ephemeral});
     }
 
@@ -1093,6 +1150,7 @@ client.on('interactionCreate', async interaction => {
       if (won) { u.coins += bet; u.totalEarned=(u.totalEarned||0)+bet; }
       else      { u.coins = Math.max(0, u.coins - bet); }
       await saveUser(u);
+      sendLog(client,{title:'🪙 Coinflip',color:won?0x57F287:0xED4245,fields:[{name:'Player',value:`<@${me.id}>`,inline:true},{name:'Result',value:actualResult,inline:true},{name:won?'Won':'Lost',value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`,inline:true},{name:'Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
 
       const color = won ? 0x57F287 : 0xED4245;
       const title = won ? `${emoji} ${actualResult.toUpperCase()} — You Win!` : `${emoji} ${actualResult.toUpperCase()} — You Lose!`;
@@ -1139,6 +1197,7 @@ client.on('interactionCreate', async interaction => {
       if (isWin)  { u.coins += payout; u.totalEarned=(u.totalEarned||0)+payout; }
       else         { u.coins = Math.max(0, u.coins - bet); }
       await saveUser(u);
+      sendLog(client,{title:'🎰 Slots',color:isWin?0x57F287:0xED4245,fields:[{name:'Player',value:`<@${me.id}>`,inline:true},{name:'Reels',value:reels.join(' '),inline:true},{name:isWin?'Won':'Lost',value:`**${(isWin?payout:bet).toLocaleString()}** ${COIN_EMOJI}`,inline:true},{name:'Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
 
       const color = isWin ? 0x57F287 : 0xED4245;
       const resultText = isJackpot ? '🎉 **JACKPOT! 5x payout!**' : isWin ? '✅ **Winner!**' : '❌ **No match — You lose!**';
@@ -1226,6 +1285,7 @@ client.on('interactionCreate', async interaction => {
       if (won)  { u.coins += bet; u.totalEarned=(u.totalEarned||0)+bet; }
       else       { u.coins = Math.max(0, u.coins - bet); }
       await saveUser(u);
+      sendLog(client,{title:'⚡ Double or Nothing',color:won?0x57F287:0xED4245,fields:[{name:'Player',value:`<@${me.id}>`,inline:true},{name:'Roll',value:`**${roll}**/100`,inline:true},{name:won?'Won':'Lost',value:`**${bet.toLocaleString()}** ${COIN_EMOJI}`,inline:true},{name:'Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
 
       const color = won ? 0x57F287 : 0xED4245;
       const bar   = won ? '🟩'.repeat(Math.round(roll/10)) : '🟥'.repeat(Math.round(roll/10));
