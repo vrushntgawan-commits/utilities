@@ -41,7 +41,7 @@ const BOT_TOKEN        =  process.env.BOT_TOKEN;
 const COIN_EMOJI       = '<:CoinEmoji:1481246827448766526>';
 const ROBUX_EMOJI      = '<:robux:1481247240914731109>';
 const PREFIX               = 'u!';
-const BOT_COMMANDS_CHANNEL = ''; // Set this to your bot-commands channel ID if you want to restrict commands to one channel
+const BLOCKED_CMD_CHANNEL  = '1480823997498134540'; // Commands are NOT allowed in this channel
 
 // ── Moderator role detection ──
 // Any role whose name contains one of these keywords (case-insensitive) counts as a mod
@@ -833,32 +833,35 @@ client.on('interactionCreate', async interaction => {
   const me    = interaction.user;
   const reply = p => interaction.reply(p);
 
-  // Non-admin command used outside bot-commands channel → timeout 30s + DM warning
+  // Block bot commands in the GTN/games channel — timeout 30s (mods/admins exempt)
   const NON_ADMIN_CMDS = ['balance','daily','shop','inventory','leaderboard','help','use-code','redeem','claim'];
-  if (NON_ADMIN_CMDS.includes(cmd) && BOT_COMMANDS_CHANNEL && interaction.channel.id !== BOT_COMMANDS_CHANNEL) {
-    try {
-      const member = await interaction.guild.members.fetch(me.id);
-      // Timeout for 30 seconds
-      await member.timeout(30 * 1000, 'Used bot commands outside bot-commands channel');
-      // DM warning
+  if (NON_ADMIN_CMDS.includes(cmd) && BLOCKED_CMD_CHANNEL && interaction.channel.id === BLOCKED_CMD_CHANNEL) {
+    const member = await interaction.guild.members.fetch(me.id).catch(() => null);
+    if (!isModerator(member)) {
+      try { await member.timeout(30 * 1000, 'Used bot commands in a restricted channel'); } catch {}
       try {
         await me.send({ embeds: [new EmbedBuilder()
           .setColor(0xED4245)
           .setTitle('⚠️ Wrong Channel!')
           .setDescription(
-            `You used \`/${cmd}\` outside the designated bot commands channel!\n\n` +
-            `Please use bot commands in <#${BOT_COMMANDS_CHANNEL}> only.\n\n` +
-            `You have been timed out for **30 seconds**.`
+            `You cannot use bot commands in <#${BLOCKED_CMD_CHANNEL}>!
+
+` +
+            `Please use bot commands in any other channel.
+
+` +
+            `You have been timed out for **30 seconds** as a reminder.`
           )] });
       } catch {}
-      return interaction.reply({ embeds: [new EmbedBuilder()
-        .setColor(0xED4245)
-        .setDescription(`❌ Please use bot commands in <#${BOT_COMMANDS_CHANNEL}> only! You have been timed out for 30 seconds.`)],
-        flags: MessageFlags.Ephemeral });
-    } catch (e) {
-      console.error('Timeout error:', e.message);
+      return interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setColor(0xED4245)
+          .setDescription(`❌ You cannot use bot commands in this channel! You have been timed out for 30 seconds.`)],
+        flags: MessageFlags.Ephemeral,
+      });
     }
   }
+
 
   try {
     if (cmd === 'balance')     return await cmdBalance(reply, interaction.options.getUser('user') || me);
