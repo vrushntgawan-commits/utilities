@@ -833,24 +833,23 @@ client.on('interactionCreate', async interaction => {
   const me    = interaction.user;
   const reply = p => interaction.reply(p);
 
-  // Block bot commands in the GTN/games channel — timeout 30s (mods/admins exempt)
+  // Block bot commands ONLY in the GTN channel — timeout 30s (mods/admins exempt)
   const NON_ADMIN_CMDS = ['balance','daily','shop','inventory','leaderboard','help','use-code','redeem','claim'];
-  if (NON_ADMIN_CMDS.includes(cmd) && BLOCKED_CMD_CHANNEL && interaction.channel.id === BLOCKED_CMD_CHANNEL) {
+  const inBlockedChannel = interaction.channel && interaction.channel.id === BLOCKED_CMD_CHANNEL;
+  console.log(`CMD: /${cmd} | Channel: ${interaction.channel?.id} | Blocked: ${inBlockedChannel}`);
+  if (NON_ADMIN_CMDS.includes(cmd) && inBlockedChannel) {
     const member = await interaction.guild.members.fetch(me.id).catch(() => null);
-    if (!isModerator(member)) {
-      try { await member.timeout(30 * 1000, 'Used bot commands in a restricted channel'); } catch {}
+    if (member && !isModerator(member)) {
+      console.log(`Timing out ${me.username} for using /${cmd} in blocked channel`);
+      try { await member.timeout(30 * 1000, 'Bot commands not allowed in this channel'); } catch {}
       try {
         await me.send({ embeds: [new EmbedBuilder()
           .setColor(0xED4245)
           .setTitle('⚠️ Wrong Channel!')
           .setDescription(
-            `You cannot use bot commands in <#${BLOCKED_CMD_CHANNEL}>!
-
-` +
-            `Please use bot commands in any other channel.
-
-` +
-            `You have been timed out for **30 seconds** as a reminder.`
+            `You cannot use bot commands in <#${BLOCKED_CMD_CHANNEL}>!\n\n` +
+            `Please use bot commands in any other channel.\n\n` +
+            `You have been timed out for **30 seconds**.`
           )] });
       } catch {}
       return interaction.reply({
@@ -861,7 +860,6 @@ client.on('interactionCreate', async interaction => {
       });
     }
   }
-
 
   try {
     if (cmd === 'balance')     return await cmdBalance(reply, interaction.options.getUser('user') || me);
