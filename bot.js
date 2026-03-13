@@ -39,8 +39,22 @@ const GUILD_ID         = (process.env.GUILD_ID   || '').trim();
 const JSONBIN_KEY      =  process.env.JSONBIN_KEY;
 const BOT_TOKEN        =  process.env.BOT_TOKEN;
 const COIN_EMOJI       = '<:CoinEmoji:1481246827448766526>';
-const ROBUX_EMOJI      = '<:robux:1481247240914731109>'; // If this shows as :Robux: use 💎 instead
-const PREFIX           = 'u!';
+const ROBUX_EMOJI      = '<:robux:1481247240914731109>';
+const PREFIX               = 'u!';
+const BOT_COMMANDS_CHANNEL = ''; // Set this to your bot-commands channel ID if you want to restrict commands to one channel
+
+// ── Moderator role detection ──
+// Any role whose name contains one of these keywords (case-insensitive) counts as a mod
+const MOD_KEYWORDS = ['moderator', 'mod', 'admin', 'staff', 'helper', 'support'];
+
+function isModerator(member) {
+  if (!member) return false;
+  if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+  return member.roles.cache.some(r =>
+    MOD_KEYWORDS.some(kw => r.name.toLowerCase().includes(kw))
+  );
+}
+
 
 // ══════════════════════════════════════════
 //  CODES
@@ -79,16 +93,18 @@ const BIN_IDS = {
   store:  '69b13e7dc3097a1dd516fdc5',
   meta:   '69b13e8fb7ec241ddc5c5aa3',
   claims: '69b13ebbb7ec241ddc5c5b4b',
+  warns:  '69b13ebbb7ec241ddc5c5b4c',
 };
 const DEFAULTS = {
   users:  {},
   store:  { robux: 0, divines: 0, celestials: 0 },
   meta:   { stockMsgId: null, claimCounter: 0 },
   claims: [],
+  warns:  {},
 };
-const cache     = { users: null, store: null, meta: null, claims: null };
-const cacheTime = { users: 0,    store: 0,    meta: 0,    claims: 0    };
-const CACHE_TTL = { users: Infinity, store: 30_000, meta: 30_000, claims: 30_000 };
+const cache     = { users: null, store: null, meta: null, claims: null, warns: null };
+const cacheTime = { users: 0,    store: 0,    meta: 0,    claims: 0,    warns: 0    };
+const CACHE_TTL = { users: Infinity, store: 30_000, meta: 30_000, claims: 30_000, warns: 30_000 };
 
 async function binRead(name) {
   const res = await safeFetch(`https://api.jsonbin.io/v3/b/${BIN_IDS[name]}/latest`, {
@@ -154,6 +170,8 @@ async function getMeta()     { return dbRead('meta'); }
 async function saveMeta(m)   { await dbWrite('meta', m); }
 async function getClaims()   { return dbRead('claims'); }
 async function saveClaims(c) { await dbWrite('claims', c); }
+async function getWarns(userId)  { const w = await dbRead('warns'); return w[userId] || []; }
+async function saveWarns(userId, arr) { const w = await dbRead('warns'); w[userId] = arr; await dbWrite('warns', w); }
 async function nextClaimId() {
   const meta = await getMeta();
   meta.claimCounter = (meta.claimCounter || 0) + 1;
@@ -251,6 +269,27 @@ const slashDefs = [
     .addIntegerOption(o=>o.setName('max').setDescription('Maximum number').setRequired(true).setMinValue(2))
     .addIntegerOption(o=>o.setName('number').setDescription('The winning number').setRequired(true))
     .addIntegerOption(o=>o.setName('prize').setDescription('Coins prize for the winner').setRequired(true).setMinValue(1)),
+  new SCB().setName('timeout').setDescription('[MOD] Timeout a user').setDefaultMemberPermissions(PFB.ModerateMembers)
+    .addUserOption(o=>o.setName('user').setDescription('User to timeout').setRequired(true))
+    .addIntegerOption(o=>o.setName('minutes').setDescription('Duration in minutes').setRequired(true).setMinValue(1).setMaxValue(40320))
+    .addStringOption(o=>o.setName('reason').setDescription('Reason').setRequired(false)),
+  new SCB().setName('untimeout').setDescription('[MOD] Remove timeout from a user').setDefaultMemberPermissions(PFB.ModerateMembers)
+    .addUserOption(o=>o.setName('user').setDescription('User to untimeout').setRequired(true))
+    .addStringOption(o=>o.setName('reason').setDescription('Reason').setRequired(false)),
+  new SCB().setName('warn').setDescription('[MOD] Warn a user').setDefaultMemberPermissions(PFB.ModerateMembers)
+    .addUserOption(o=>o.setName('user').setDescription('User to warn').setRequired(true))
+    .addStringOption(o=>o.setName('reason').setDescription('Reason').setRequired(true)),
+  new SCB().setName('unwarn').setDescription('[MOD] Remove a warn from a user').setDefaultMemberPermissions(PFB.ModerateMembers)
+    .addUserOption(o=>o.setName('user').setDescription('User').setRequired(true))
+    .addIntegerOption(o=>o.setName('index').setDescription('Warn number to remove (from /warns)').setRequired(true).setMinValue(1)),
+  new SCB().setName('warns').setDescription('[MOD] View warns for a user').setDefaultMemberPermissions(PFB.ModerateMembers)
+    .addUserOption(o=>o.setName('user').setDescription('User').setRequired(true)),
+  new SCB().setName('kick').setDescription('[MOD] Kick a user').setDefaultMemberPermissions(PFB.KickMembers)
+    .addUserOption(o=>o.setName('user').setDescription('User to kick').setRequired(true))
+    .addStringOption(o=>o.setName('reason').setDescription('Reason').setRequired(false)),
+  new SCB().setName('ban').setDescription('[MOD] Ban a user').setDefaultMemberPermissions(PFB.BanMembers)
+    .addUserOption(o=>o.setName('user').setDescription('User to ban').setRequired(true))
+    .addStringOption(o=>o.setName('reason').setDescription('Reason').setRequired(false)),
 ].map(c => c.toJSON());
 
 // ══════════════════════════════════════════
@@ -370,7 +409,13 @@ client.once('ready', async () => {
 //  MESSAGE — 1 coin per message + prefix cmds
 // ══════════════════════════════════════════
 client.on('messageCreate', async msg => {
-  if (msg.author.bot || !msg.guild) return;
+  if (!msg.guild) return;
+  // If a bot talks, reset the spam streak for that channel so it doesn't count against the next human
+  if (msg.author.bot) {
+    const s = channelLastMsg.get(msg.channel.id);
+    if (s) { s.lastUserId = null; s.count = 0; }
+    return;
+  }
 
   // Vouch listener
   if (msg.channel.id === VOUCH_CHANNEL_ID && pendingVouches.has(msg.author.id)) {
@@ -447,6 +492,37 @@ client.on('messageCreate', async msg => {
       u.totalEarned = (u.totalEarned || 0) + 1;
       saveUser(u).catch(() => {});
     }).catch(() => {});
+  }
+
+  // Bot command detection — timeout non-admins for 30s if they use bot commands (/ or prefix)
+  const isAdminMember = msg.member?.permissions.has(PermissionFlagsBits.Administrator);
+  if (!isAdminMember) {
+    const isBotCmd = msg.content.startsWith('/') ||
+      (msg.content.startsWith(PREFIX) && msg.content.length > PREFIX.length);
+    if (isBotCmd) {
+      try {
+        // Timeout for 30 seconds
+        await msg.member.timeout(30 * 1000, 'Used bot commands in chat');
+        // Delete the message
+        try { await msg.delete(); } catch {}
+        // DM the user
+        try {
+          await msg.author.send({ embeds: [new EmbedBuilder()
+            .setColor(0xED4245)
+            .setTitle('⛔ Bot Commands Disabled!')
+            .setDescription(
+              `You were timed out for **30 seconds** for using bot commands in <#${msg.channel.id}>.
+
+` +
+              `Please use bot commands in the correct channel or via slash commands only.
+
+` +
+              `You will be automatically un-timed out after 30 seconds.`
+            )] });
+        } catch {}
+        return;
+      } catch {}
+    }
   }
 
   // Prefix commands
@@ -565,7 +641,7 @@ Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}${expiryLine}`)] });
 
 async function cmdShop(reply) {
   const robuxLines = SHOP.filter(i => i.category === 'Robux')
-    .map(i => `💎 **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
+    .map(i => `${ROBUX_EMOJI} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
   const etfbLines = SHOP.filter(i => i.category === 'ETFB')
     .map(i => `${i.id==='etfb_cel'?'✨':'🌟'} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
   return reply({ embeds: [new EmbedBuilder()
@@ -756,6 +832,33 @@ client.on('interactionCreate', async interaction => {
   const cmd   = interaction.commandName;
   const me    = interaction.user;
   const reply = p => interaction.reply(p);
+
+  // Non-admin command used outside bot-commands channel → timeout 30s + DM warning
+  const NON_ADMIN_CMDS = ['balance','daily','shop','inventory','leaderboard','help','use-code','redeem','claim'];
+  if (NON_ADMIN_CMDS.includes(cmd) && BOT_COMMANDS_CHANNEL && interaction.channel.id !== BOT_COMMANDS_CHANNEL) {
+    try {
+      const member = await interaction.guild.members.fetch(me.id);
+      // Timeout for 30 seconds
+      await member.timeout(30 * 1000, 'Used bot commands outside bot-commands channel');
+      // DM warning
+      try {
+        await me.send({ embeds: [new EmbedBuilder()
+          .setColor(0xED4245)
+          .setTitle('⚠️ Wrong Channel!')
+          .setDescription(
+            `You used \`/${cmd}\` outside the designated bot commands channel!\n\n` +
+            `Please use bot commands in <#${BOT_COMMANDS_CHANNEL}> only.\n\n` +
+            `You have been timed out for **30 seconds**.`
+          )] });
+      } catch {}
+      return interaction.reply({ embeds: [new EmbedBuilder()
+        .setColor(0xED4245)
+        .setDescription(`❌ Please use bot commands in <#${BOT_COMMANDS_CHANNEL}> only! You have been timed out for 30 seconds.`)],
+        flags: MessageFlags.Ephemeral });
+    } catch (e) {
+      console.error('Timeout error:', e.message);
+    }
+  }
 
   try {
     if (cmd === 'balance')     return await cmdBalance(reply, interaction.options.getUser('user') || me);
@@ -986,6 +1089,63 @@ client.on('interactionCreate', async interaction => {
         )] });
     }
 
+    // /timeout
+    if (cmd === 'timeout') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t      = interaction.options.getUser('user');
+      const mins   = interaction.options.getInteger('minutes');
+      const reason = interaction.options.getString('reason') || 'No reason given';
+      try {
+        const member = await interaction.guild.members.fetch(t.id);
+        await member.timeout(mins * 60 * 1000, reason);
+        try {
+          await t.send({ embeds: [new EmbedBuilder()
+            .setColor(0xED4245)
+            .setTitle('🔇 You have been timed out')
+            .setDescription(
+              `You have been timed out in **${interaction.guild.name}** for **${mins} minute(s)**.\n\n` +
+              `**Reason:** ${reason}`
+            )] });
+        } catch {}
+        return reply({ embeds: [new EmbedBuilder()
+          .setColor(0xED4245)
+          .setTitle('🔇 User Timed Out')
+          .addFields(
+            { name: 'User',     value: `<@${t.id}>`,   inline: true },
+            { name: 'Duration', value: `${mins} min(s)`, inline: true },
+            { name: 'Reason',   value: reason,           inline: false }
+          )] });
+      } catch (e) {
+        return reply({ embeds: [errEmbed(`Failed to timeout <@${t.id}>: ${e.message}`)] });
+      }
+    }
+
+    // /untimeout
+    if (cmd === 'untimeout') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t      = interaction.options.getUser('user');
+      const reason = interaction.options.getString('reason') || 'No reason given';
+      try {
+        const member = await interaction.guild.members.fetch(t.id);
+        await member.timeout(null, reason);
+        try {
+          await t.send({ embeds: [new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('🔊 Timeout Removed')
+            .setDescription(`Your timeout in **${interaction.guild.name}** has been removed.`)] });
+        } catch {}
+        return reply({ embeds: [new EmbedBuilder()
+          .setColor(0x57F287)
+          .setTitle('🔊 Timeout Removed')
+          .addFields(
+            { name: 'User',   value: `<@${t.id}>`, inline: true },
+            { name: 'Reason', value: reason,         inline: false }
+          )] });
+      } catch (e) {
+        return reply({ embeds: [errEmbed(`Failed to remove timeout from <@${t.id}>: ${e.message}`)] });
+      }
+    }
+
     // /gtn
     if (cmd === 'gtn') {
       const min    = interaction.options.getInteger('min');
@@ -1173,6 +1333,105 @@ client.on('interactionCreate', async interaction => {
       const store = await getStore(); store[type] = amt;
       await saveStore(store); await updateStockEmbed(client);
       return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Stock Updated').setDescription(`${type==='divines'?'🌟 Divines':'✨ Celestials'} set to **${amt}x**.`)] });
+    }
+
+    // /timeout
+    if (cmd === 'timeout') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t      = interaction.options.getUser('user');
+      const mins   = interaction.options.getInteger('minutes');
+      const reason = interaction.options.getString('reason') || 'No reason given';
+      try {
+        const member = await interaction.guild.members.fetch(t.id);
+        await member.timeout(mins * 60 * 1000, reason);
+        try { await t.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('⏱️ You have been timed out').addFields({name:'Duration',value:`${mins} minute(s)`,inline:true},{name:'Reason',value:reason,inline:true},{name:'Server',value:interaction.guild.name,inline:true})] }); } catch {}
+        return reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('⏱️ User Timed Out').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Duration',value:`${mins} min`,inline:true},{name:'Reason',value:reason,inline:false})] });
+      } catch (e) { return reply({ embeds: [errEmbed(`Failed to timeout: ${e.message}`)] }); }
+    }
+
+    // /untimeout
+    if (cmd === 'untimeout') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t      = interaction.options.getUser('user');
+      const reason = interaction.options.getString('reason') || 'No reason given';
+      try {
+        const member = await interaction.guild.members.fetch(t.id);
+        await member.timeout(null, reason);
+        try { await t.send({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Timeout Removed').setDescription(`Your timeout in **${interaction.guild.name}** has been removed.
+**Reason:** ${reason}`)] }); } catch {}
+        return reply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Timeout Removed').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})] });
+      } catch (e) { return reply({ embeds: [errEmbed(`Failed to untimeout: ${e.message}`)] }); }
+    }
+
+    // /warn
+    if (cmd === 'warn') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t      = interaction.options.getUser('user');
+      const reason = interaction.options.getString('reason') || 'No reason given';
+      const warns  = await getWarns(t.id);
+      warns.push({ reason, by: me.username, at: Date.now() });
+      await saveWarns(t.id, warns);
+      try { await t.send({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ You have been warned').addFields({name:'Reason',value:reason,inline:false},{name:'Total Warns',value:`${warns.length}`,inline:true},{name:'Server',value:interaction.guild.name,inline:true})] }); } catch {}
+      return reply({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ User Warned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Warn #',value:`${warns.length}`,inline:true},{name:'Reason',value:reason,inline:false})] });
+    }
+
+    // /unwarn
+    if (cmd === 'unwarn') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t     = interaction.options.getUser('user');
+      const index = interaction.options.getInteger('index') - 1;
+      const warns = await getWarns(t.id);
+      if (!warns.length) return reply({ embeds: [errEmbed(`<@${t.id}> has no warns.`)] });
+      if (index < 0 || index >= warns.length) return reply({ embeds: [errEmbed(`Invalid warn number. Use /check-warns to see the list.`)] });
+      const removed = warns.splice(index, 1)[0];
+      await saveWarns(t.id, warns);
+      return reply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Warn Removed').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Removed Warn',value:removed.reason,inline:false},{name:'Remaining Warns',value:`${warns.length}`,inline:true})] });
+    }
+
+    // /warns
+    if (cmd === 'warns' || cmd === 'check-warns') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t     = interaction.options.getUser('user');
+      const warns = await getWarns(t.id);
+      if (!warns.length) return reply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle(`⚠️ Warns — ${t.username}`).setDescription('This user has no warns! ✅')] });
+      const list = warns.map((w, i) => `**#${i+1}** \u2014 ${w.reason}\n> By ${w.by} \u00b7 ${ts(w.at, 'R')}`).join('\n\n');
+      return reply({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle(`⚠️ Warns — ${t.username}`).setDescription(list).setFooter({text:`${warns.length} total warn(s)`})] });
+    }
+
+    // /kick
+    if (cmd === 'kick') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t      = interaction.options.getUser('user');
+      const reason = interaction.options.getString('reason') || 'No reason given';
+      try {
+        const member = await interaction.guild.members.fetch(t.id);
+        try { await t.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('👢 You have been kicked').addFields({name:'Reason',value:reason,inline:false},{name:'Server',value:interaction.guild.name,inline:true})] }); } catch {}
+        await member.kick(reason);
+        return reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('👢 User Kicked').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})] });
+      } catch (e) { return reply({ embeds: [errEmbed(`Failed to kick: ${e.message}`)] }); }
+    }
+
+    // /ban
+    if (cmd === 'ban') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const t      = interaction.options.getUser('user');
+      const reason = interaction.options.getString('reason') || 'No reason given';
+      try {
+        try { await t.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('🔨 You have been banned').addFields({name:'Reason',value:reason,inline:false},{name:'Server',value:interaction.guild.name,inline:true})] }); } catch {}
+        await interaction.guild.members.ban(t.id, { reason });
+        return reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('🔨 User Banned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})] });
+      } catch (e) { return reply({ embeds: [errEmbed(`Failed to ban: ${e.message}`)] }); }
+    }
+
+    // /unban
+    if (cmd === 'unban') {
+      if (!isModerator(interaction.member)) return reply({ embeds: [errEmbed('You need a Moderator or Admin role to use this!')], flags: MessageFlags.Ephemeral });
+      const userId = interaction.options.getString('userid').trim();
+      const reason = interaction.options.getString('reason') || 'No reason given';
+      try {
+        await interaction.guild.members.unban(userId, reason);
+        return reply({ embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ User Unbanned').addFields({name:'User ID',value:userId,inline:true},{name:'Reason',value:reason,inline:false})] });
+      } catch (e) { return reply({ embeds: [errEmbed(`Failed to unban: ${e.message}`)] }); }
     }
 
   } catch (e) {
