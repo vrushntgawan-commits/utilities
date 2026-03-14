@@ -449,16 +449,19 @@ client.on('messageCreate', async msg => {
 
   await handleSpamCheck(msg);
 
+  const NO_COIN_CHANNELS = ['1480831806226825308','1481371074309390346','1482076857321914378'];
   const uid = msg.author.id;
-  if (!cache.users) { try { await dbRead('users'); } catch {} }
-  if (cache.users) {
-    if (!cache.users[uid]) cache.users[uid] = { id:uid, username:msg.author.username, coins:0, totalEarned:0, lastDaily:null, inventory:[], redeemedCodes:[] };
-    cache.users[uid].coins       = (cache.users[uid].coins       || 0) + 1;
-    cache.users[uid].totalEarned = (cache.users[uid].totalEarned || 0) + 1;
-    cache.users[uid].username    = msg.author.username;
-    scheduleCoinFlush();
-  } else {
-    getUser(uid, msg.author.username).then(u => { u.coins++; u.totalEarned=(u.totalEarned||0)+1; saveUser(u).catch(()=>{}); }).catch(()=>{});
+  if (!NO_COIN_CHANNELS.includes(msg.channel.id)) {
+    if (!cache.users) { try { await dbRead('users'); } catch {} }
+    if (cache.users) {
+      if (!cache.users[uid]) cache.users[uid] = { id:uid, username:msg.author.username, coins:0, totalEarned:0, lastDaily:null, inventory:[], redeemedCodes:[] };
+      cache.users[uid].coins       = (cache.users[uid].coins       || 0) + 1;
+      cache.users[uid].totalEarned = (cache.users[uid].totalEarned || 0) + 1;
+      cache.users[uid].username    = msg.author.username;
+      scheduleCoinFlush();
+    } else {
+      getUser(uid, msg.author.username).then(u => { u.coins++; u.totalEarned=(u.totalEarned||0)+1; saveUser(u).catch(()=>{}); }).catch(()=>{});
+    }
   }
 
   if (!msg.content.startsWith(PREFIX)) return;
@@ -863,18 +866,12 @@ client.on('interactionCreate', async interaction => {
       try {
         const t=await client.users.fetch(claim.userId);
         try { await t.send({embeds:[new EmbedBuilder().setColor(0x5865F2).setTitle('⭐ Please Leave a Vouch!').setDescription(`Hey! You just received **${claim.itemName}** 🎉\n\nPlease leave a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n**Format:** \`Vouch @${me.username} <your feedback>\`\n\nIt only takes a second and helps us a lot! 🙏`).setFooter({text:`Claim ${claimId}`})]}); } catch {}
-        const sendVouchReminder=async(attempt)=>{
+        // Send ONE reminder after 1 hour, then stop
+        const vt=setTimeout(async()=>{
           if (!pendingVouches.has(claim.userId)) return;
-          try { const target=await client.users.fetch(claim.userId); await target.send({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⭐ Reminder: Please Vouch!').setDescription(`Hey! You received **${claim.itemName}** a while ago.\n\nPlease drop a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n**Format:** \`Vouch @${me.username} <your feedback>\`\n\nThis is reminder **#${attempt}/3** 🙏`).setFooter({text:`Claim ${claimId}`})]}); } catch {}
-          if (attempt===3) {
-            // Final reminder sent — fire alert and stop
-            pendingVouches.delete(claim.userId);
-            try { const ach=await client.channels.fetch(ALERT_CHANNEL_ID); if(ach){ await ach.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⚠️ Vouch Not Received').setDescription(`<@${claim.userId}> did not vouch after **3** reminders for **${claim.itemName}** (\`${claimId}\`).`)]}); } } catch {}
-            return; // stop — no more reminders
-          }
-          if (pendingVouches.has(claim.userId)) { const nt=setTimeout(()=>sendVouchReminder(attempt+1),60*60*1000); pendingVouches.get(claim.userId).timeout=nt; }
-        };
-        const vt=setTimeout(()=>sendVouchReminder(1),60*60*1000);
+          pendingVouches.delete(claim.userId);
+          try { const target=await client.users.fetch(claim.userId); await target.send({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⭐ Reminder: Please Vouch!').setDescription(`Hey! You received **${claim.itemName}** a while ago.\n\nPlease drop a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n**Format:** \`Vouch @${me.username} <your feedback>\`\n\nThis helps us a lot! 🙏`).setFooter({text:`Claim ${claimId}`})]}); } catch {}
+        }, 60*60*1000);
         pendingVouches.set(claim.userId,{claimId,itemName:claim.itemName,fulfilledBy:me.username,timeout:vt});
       } catch {}
       return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('✅ Claim Fulfilled').addFields({name:'Claim',value:`\`${claimId}\``,inline:true},{name:'User',value:`<@${claim.userId}>`,inline:true},{name:'Item',value:claim.itemName,inline:true},{name:'DM',value:dmSent?'✅ Sent':'❌ DMs off',inline:true})]});
