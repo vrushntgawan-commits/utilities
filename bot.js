@@ -322,15 +322,15 @@ const slashDefs = [
   new SCB().setName('ban').setDescription('[MOD] Ban a user').setDefaultMemberPermissions(PFB.BanMembers)
     .addUserOption(o=>o.setName('user').setDescription('User to ban').setRequired(true))
     .addStringOption(o=>o.setName('reason').setDescription('Reason').setRequired(false)),
-  // ── GAMBLING (admin only for now) ──
-  new SCB().setName('coinflip').setDescription('[ADMIN] Flip a coin and bet coins').setDefaultMemberPermissions(PFB.Administrator)
+  // ── GAMBLING (open to everyone) ──
+  new SCB().setName('coinflip').setDescription('Flip a coin and bet coins')
     .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1))
     .addStringOption(o=>o.setName('side').setDescription('Heads or Tails?').setRequired(true).addChoices({name:'Heads',value:'heads'},{name:'Tails',value:'tails'})),
-  new SCB().setName('slots').setDescription('[ADMIN] Spin the slot machine').setDefaultMemberPermissions(PFB.Administrator)
+  new SCB().setName('slots').setDescription('Spin the slot machine')
     .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
-  new SCB().setName('blackjack').setDescription('[ADMIN] Play a hand of Blackjack').setDefaultMemberPermissions(PFB.Administrator)
+  new SCB().setName('blackjack').setDescription('Play a hand of Blackjack')
     .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
-  new SCB().setName('doubleornothing').setDescription('[ADMIN] Double your coins or lose them all').setDefaultMemberPermissions(PFB.Administrator)
+  new SCB().setName('doubleornothing').setDescription('Double your coins or lose them all')
     .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
   new SCB().setName('lootdrop').setDescription('[ADMIN] Drop a mystery loot box (10–50 coins, first to claim wins)').setDefaultMemberPermissions(PFB.Administrator),
 ].map(c => c.toJSON());
@@ -618,7 +618,8 @@ async function cmdHelp(reply) {
   return reply({ embeds:[new EmbedBuilder().setTitle(`📖 Help — Prefix: \`${PREFIX}\``).setColor(0x5865F2).addFields(
     {name:'💰 Economy',value:`\`${PREFIX}balance\` — check your ${COIN_EMOJI}\n\`${PREFIX}daily\` — 10–15 ${COIN_EMOJI} every 24h\n\`${PREFIX}leaderboard\` — top 10\n💬 Every message = 1 ${COIN_EMOJI}`,inline:false},
     {name:'🛒 Shop',value:`\`${PREFIX}shop\` — view items & prices\n\`${PREFIX}redeem <id>\` — buy an item\n\`${PREFIX}inventory\` — view your items\n\`/claim <id>\` — submit a delivery claim`,inline:false},
-    {name:'🎟️ Codes',value:`\`/use-code <code>\` or \`${PREFIX}use-code <code>\``,inline:false}
+    {name:'🎟️ Codes',value:`\`/use-code <code>\` or \`${PREFIX}use-code <code>\``,inline:false},
+    {name:'🎲 Gambling',value:`\`/coinflip <bet> <heads|tails>\` — flip a coin\n\`/slots <bet>\` — spin the slot machine\n\`/blackjack <bet>\` — play blackjack\n\`/doubleornothing <bet>\` — double or lose it all`,inline:false}
   )] });
 }
 
@@ -1135,7 +1136,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     // ══════════════════════════════════════════
-    //  GAMBLING COMMANDS (admin only for now)
+    //  GAMBLING COMMANDS
     // ══════════════════════════════════════════
 
     // ── Win chance: 30% normal, 20% if bet >= 500 ──
