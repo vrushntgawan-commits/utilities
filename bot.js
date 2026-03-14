@@ -281,7 +281,7 @@ const slashDefs = [
   new SCB().setName('update-robux').setDescription('[ADMIN] Update Robux stock').setDefaultMemberPermissions(PFB.Administrator).addIntegerOption(o=>o.setName('amount').setDescription('New amount').setRequired(true).setMinValue(0)),
   new SCB().setName('update-etfb').setDescription('[ADMIN] Update ETFB stock').setDefaultMemberPermissions(PFB.Administrator).addStringOption(o=>o.setName('type').setDescription('Which item').setRequired(true).addChoices({name:'Divines',value:'divines'},{name:'Celestials',value:'celestials'})).addIntegerOption(o=>o.setName('amount').setDescription('New amount').setRequired(true).setMinValue(0)),
   new SCB().setName('give').setDescription('[ADMIN] Give coins to a user').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target').setRequired(true)).addIntegerOption(o=>o.setName('amount').setDescription('Amount').setRequired(true).setMinValue(1)),
-  new SCB().setName('take').setDescription('[ADMIN] Take coins from a user').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target').setRequired(true)).addIntegerOption(o=>o.setName('amount').setDescription('Amount').setRequired(true).setMinValue(1)),
+  new SCB().setName('take').setDescription('[ADMIN] Take coins from a user').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target').setRequired(true)).addIntegerOption(o=>o.setName('amount').setDescription('Amount (ignored if all=true)').setRequired(false).setMinValue(1)).addBooleanOption(o=>o.setName('all').setDescription('Take ALL coins from the user').setRequired(false)),
   new SCB().setName('remove-inv').setDescription('[ADMIN] Remove an item from a user inventory').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true)).addStringOption(o=>o.setName('claim_id').setDescription('Claim ID to remove').setRequired(true)),
   new SCB().setName('check-inventory').setDescription('[ADMIN] View any user inventory').setDefaultMemberPermissions(PFB.Administrator).addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true)),
   new SCB().setName('make-code').setDescription('[ADMIN] Create a permanent saved code').setDefaultMemberPermissions(PFB.Administrator)
@@ -865,8 +865,13 @@ client.on('interactionCreate', async interaction => {
         try { await t.send({embeds:[new EmbedBuilder().setColor(0x5865F2).setTitle('⭐ Please Leave a Vouch!').setDescription(`Hey! You just received **${claim.itemName}** 🎉\n\nPlease leave a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n**Format:** \`Vouch @${me.username} <your feedback>\`\n\nIt only takes a second and helps us a lot! 🙏`).setFooter({text:`Claim ${claimId}`})]}); } catch {}
         const sendVouchReminder=async(attempt)=>{
           if (!pendingVouches.has(claim.userId)) return;
-          try { const target=await client.users.fetch(claim.userId); await target.send({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⭐ Reminder: Please Vouch!').setDescription(`Hey! You received **${claim.itemName}** a while ago.\n\nPlease drop a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n**Format:** \`Vouch @${me.username} <your feedback>\`\n\nThis is reminder **#${attempt}** — we'll keep reminding you until you vouch! 🙏`).setFooter({text:`Claim ${claimId}`})]}); } catch {}
-          if (attempt===3) { try { const ach=await client.channels.fetch(ALERT_CHANNEL_ID); if(ach){const alertMsg=await ach.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⚠️ Vouch Not Received').setDescription(`<@${claim.userId}> has not vouched after **3** reminders for **${claim.itemName}** (\`${claimId}\`).`)]}); if(pendingVouches.has(claim.userId)) pendingVouches.get(claim.userId).alertMsg=alertMsg;} } catch {} }
+          try { const target=await client.users.fetch(claim.userId); await target.send({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('⭐ Reminder: Please Vouch!').setDescription(`Hey! You received **${claim.itemName}** a while ago.\n\nPlease drop a vouch in <#${VOUCH_CHANNEL_ID}>!\n\n**Format:** \`Vouch @${me.username} <your feedback>\`\n\nThis is reminder **#${attempt}/3** 🙏`).setFooter({text:`Claim ${claimId}`})]}); } catch {}
+          if (attempt===3) {
+            // Final reminder sent — fire alert and stop
+            pendingVouches.delete(claim.userId);
+            try { const ach=await client.channels.fetch(ALERT_CHANNEL_ID); if(ach){ await ach.send({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('⚠️ Vouch Not Received').setDescription(`<@${claim.userId}> did not vouch after **3** reminders for **${claim.itemName}** (\`${claimId}\`).`)]}); } } catch {}
+            return; // stop — no more reminders
+          }
           if (pendingVouches.has(claim.userId)) { const nt=setTimeout(()=>sendVouchReminder(attempt+1),60*60*1000); pendingVouches.get(claim.userId).timeout=nt; }
         };
         const vt=setTimeout(()=>sendVouchReminder(1),60*60*1000);
@@ -913,10 +918,16 @@ client.on('interactionCreate', async interaction => {
       return reply({embeds:[okEmbed(`Gave **${amt}** ${COIN_EMOJI} to <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)]});
     }
     if (cmd==='take') {
-      const t=interaction.options.getUser('user'), amt=interaction.options.getInteger('amount');
-      const u=await getUser(t.id,t.username); u.coins=Math.max(0,u.coins-amt); await saveUser(u);
-      sendLog(client,{title:'💸 Coins Taken',color:0xED4245,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'From',value:`<@${t.id}>`,inline:true},{name:'Amount',value:`-**${amt}** ${COIN_EMOJI}`,inline:true},{name:'New Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
-      return reply({embeds:[okEmbed(`Took **${amt}** ${COIN_EMOJI} from <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)]});
+      const t=interaction.options.getUser('user');
+      const takeAll=interaction.options.getBoolean('all')||false;
+      const amt=takeAll?null:interaction.options.getInteger('amount');
+      if (!takeAll && !amt) return reply({embeds:[errEmbed('Provide an amount or set `all` to true.')],flags:MessageFlags.Ephemeral});
+      const u=await getUser(t.id,t.username);
+      const taken=takeAll?u.coins:amt;
+      u.coins=takeAll?0:Math.max(0,u.coins-amt);
+      await saveUser(u);
+      sendLog(client,{title:'💸 Coins Taken',color:0xED4245,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'From',value:`<@${t.id}>`,inline:true},{name:'Amount',value:`-**${taken.toLocaleString()}** ${COIN_EMOJI}${takeAll?' (ALL)':''}`,inline:true},{name:'New Balance',value:`**${u.coins.toLocaleString()}** ${COIN_EMOJI}`,inline:true}]});
+      return reply({embeds:[okEmbed(`Took **${taken.toLocaleString()}** ${COIN_EMOJI} from <@${t.id}>. Balance: **${u.coins.toLocaleString()}** ${COIN_EMOJI}`)]});
     }
 
     // ── CODES (all saved to JSONBin now) ──
