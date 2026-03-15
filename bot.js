@@ -89,11 +89,13 @@ const BIN_IDS = {
   meta:   '69b13e8fb7ec241ddc5c5aa3',
   claims: '69b13ebbb7ec241ddc5c5b4b',
   warns:  '69b13ebbb7ec241ddc5c5b4c',
-  codes:  '69b3f981b7ec241ddc65e003',
+  codes:   '69b3f981b7ec241ddc65e003',
+  roblox:  '69b663fab7ec241ddc6d458d',
 };
 const DEFAULTS = {
   users:  {},
   store:  { robux: 0, divines: 0, celestials: 0 },
+  roblox: {},
   meta:   { stockMsgId: null, claimCounter: 0 },
   claims: [],
   warns:  {},
@@ -333,6 +335,8 @@ const slashDefs = [
   new SCB().setName('doubleornothing').setDescription('Double your coins or lose them all')
     .addIntegerOption(o=>o.setName('bet').setDescription('How many coins to bet').setRequired(true).setMinValue(1)),
   new SCB().setName('lootdrop').setDescription('[ADMIN] Drop a mystery loot box (10–50 coins, first to claim wins)').setDefaultMemberPermissions(PFB.Administrator),
+  new SCB().setName('add-user').setDescription('Link your Roblox username to your Discord account').addStringOption(o=>o.setName('roblox_username').setDescription('Your Roblox username').setRequired(true)),
+  new SCB().setName('check-user').setDescription('See all linked Roblox users').setDefaultMemberPermissions(PFB.Administrator),
 ].map(c => c.toJSON());
 
 let coinWriteTimer = null;
@@ -1104,6 +1108,51 @@ client.on('interactionCreate', async interaction => {
         sendLog(client,{title:'🔨 User Banned',color:0xED4245,fields:[{name:'Mod',value:`<@${me.id}>`,inline:true},{name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false}],user:me.username});
         return reply({embeds:[new EmbedBuilder().setColor(0xED4245).setTitle('🔨 User Banned').addFields({name:'User',value:`<@${t.id}>`,inline:true},{name:'Reason',value:reason,inline:false})]});
       } catch(e){return reply({embeds:[errEmbed(`Failed to ban: ${e.message}`)]}); }
+    }
+
+    // ══════════════════════════════════════════
+    //  ROBLOX USER LINKING
+    // ══════════════════════════════════════════
+    if (cmd==='add-user') {
+      const robloxUser = interaction.options.getString('roblox_username').trim();
+      const data = await dbRead('roblox');
+      // Check if this Roblox username is already taken by someone else
+      const takenBy = Object.entries(data).find(([uid, d]) => d.robloxUsername && d.robloxUsername.toLowerCase() === robloxUser.toLowerCase() && uid !== me.id);
+      if (takenBy) return reply({embeds:[errEmbed(`The Roblox username \`${robloxUser}\` is already linked to another Discord account!`)],flags:MessageFlags.Ephemeral});
+      // Update if already linked
+      if (data[me.id]) {
+        const prev = data[me.id];
+        data[me.id] = { discordName: me.username, robloxUsername: robloxUser, updatedAt: Date.now() };
+        await dbWrite('roblox', data);
+        sendLog(client,{title:'🎮 Roblox Username Updated',color:0xFEE75C,fields:[{name:'Discord',value:`<@${me.id}>`,inline:true},{name:'Old Roblox',value:prev.robloxUsername,inline:true},{name:'New Roblox',value:robloxUser,inline:true}]});
+        return reply({embeds:[new EmbedBuilder().setColor(0xFEE75C).setTitle('🎮 Roblox Username Updated!').setDescription(`Your Roblox username has been updated!
+
+**Discord:** ${me.username}
+**Roblox:** \`${robloxUser}\``).setFooter({text:'Updated successfully'})],flags:MessageFlags.Ephemeral});
+      }
+      // Fresh link
+      data[me.id] = { discordName: me.username, robloxUsername: robloxUser, linkedAt: Date.now() };
+      await dbWrite('roblox', data);
+      sendLog(client,{title:'🎮 Roblox Username Linked',color:0x57F287,fields:[{name:'Discord',value:`<@${me.id}>`,inline:true},{name:'Roblox',value:robloxUser,inline:true}]});
+      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎮 Roblox Username Linked!').setDescription(`You've been linked successfully!
+
+**Discord:** ${me.username}
+**Roblox:** \`${robloxUser}\``).setFooter({text:'Use /add-user again to update your username'})],flags:MessageFlags.Ephemeral});
+    }
+
+    if (cmd==='check-user') {
+      await interaction.deferReply({flags:MessageFlags.Ephemeral});
+      const data = await dbRead('roblox');
+      const entries = Object.entries(data).filter(([k]) => k !== '_init');
+      if (!entries.length) return interaction.editReply({embeds:[new EmbedBuilder().setColor(0xFEE75C).setDescription('No users linked yet.')]});
+      const pages = [];
+      const perPage = 15;
+      for (let i = 0; i < entries.length; i += perPage) {
+        const chunk = entries.slice(i, i + perPage);
+        const lines = chunk.map(([uid, d]) => `<@${uid}> — \`${d.robloxUsername}\``).join('\n');
+        pages.push(lines);
+      }
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x5865F2).setTitle(`🎮 Linked Roblox Users — ${entries.length} total`).setDescription(pages[0]).setFooter({text:`Page 1 of ${pages.length}`})]});
     }
 
     // ══════════════════════════════════════════
