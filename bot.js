@@ -77,6 +77,7 @@ const SHOP = [
   { id: 'robux_250',  name: '250 Robux',  cost: 1000, category: 'Robux', robuxAmt: 250 },
   { id: 'etfb_cel',   name: 'Celestial',  cost: 100,  category: 'ETFB',  robuxAmt: 0   },
   { id: 'etfb_div',   name: 'Divine',     cost: 250,  category: 'ETFB',  robuxAmt: 0   },
+  { id: 'nitro',      name: 'Nitro Method', cost: 1000, category: 'Nitro', robuxAmt: 0   },
 ];
 
 // ══════════════════════════════════════════
@@ -599,7 +600,8 @@ async function cmdUseCode(reply, userId, username, codeInput) {
 async function cmdShop(reply) {
   const robuxLines=SHOP.filter(i=>i.category==='Robux').map(i=>`${ROBUX_EMOJI} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
   const etfbLines=SHOP.filter(i=>i.category==='ETFB').map(i=>`${i.id==='etfb_cel'?'✨':'🌟'} **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
-  return reply({ embeds:[new EmbedBuilder().setTitle('🏪 Rewards Shop').setColor(0x9B59B6).addFields({name:'💎 Robux',value:robuxLines,inline:false},{name:'🎮 ETFB',value:etfbLines,inline:false}).setFooter({text:'Buy: /redeem  |  Then: /claim <id>'})] });
+  const nitroLines=SHOP.filter(i=>i.category==='Nitro').map(i=>`💜 **${i.name}** — \`${i.cost}\` ${COIN_EMOJI}  ·  \`${i.id}\``).join('\n');
+  return reply({ embeds:[new EmbedBuilder().setTitle('🏪 Rewards Shop').setColor(0x9B59B6).addFields({name:'💎 Robux',value:robuxLines,inline:false},{name:'🎮 ETFB',value:etfbLines,inline:false},{name:'💜 Nitro',value:nitroLines,inline:false}).setFooter({text:'Buy: /redeem  |  Then: /claim <id>'})] });
 }
 
 async function cmdInventory(reply, userId, username) {
@@ -828,6 +830,20 @@ client.on('interactionCreate', async interaction => {
       const idArg=interaction.options.getString('id').toUpperCase();
       const u=await getUser(me.id,me.username), item=(u.inventory||[]).find(i=>i.claimId===idArg);
       if (!item) return reply({embeds:[errEmbed(`No item \`${idArg}\` in your inventory.`)],flags:MessageFlags.Ephemeral});
+
+      // Nitro: no modal needed — auto-submit immediately
+      if (item.category==='Nitro') {
+        await interaction.deferReply({flags:MessageFlags.Ephemeral});
+        u.inventory.splice(u.inventory.findIndex(i=>i.claimId===idArg),1);
+        await saveUser(u);
+        const claimsArr=await getClaims();
+        const arr=Array.isArray(claimsArr)?claimsArr:[];
+        arr.push({claimId:idArg,userId:me.id,username:me.username,itemId:'nitro',itemName:'Nitro Method',category:'Nitro',robuxAmt:0,robloxUsername:'N/A',gamepassLink:null,claimedAt:Date.now(),status:'pending'});
+        await saveClaims(arr);
+        sendLog(client,{title:'📋 Claim Submitted',color:0x5865F2,fields:[{name:'User',value:`<@${me.id}>`,inline:true},{name:'Claim ID',value:`\`${idArg}\``,inline:true},{name:'Item',value:'Nitro Method',inline:true}]});
+        return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('📬 Claim Submitted!').setDescription(`Your claim for **Nitro Method** has been submitted!\n\n**Claim ID:** \`${idArg}\`\n\nAn admin will reach out to you shortly!`)]});
+      }
+
       const modal=new ModalBuilder().setCustomId(`claim_modal_${item.claimId}`).setTitle(`Claim: ${item.name}`);
       modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('roblox_username').setLabel('Your Roblox Username').setStyle(TextInputStyle.Short).setPlaceholder('e.g. Builderman').setRequired(true)));
       if (item.category==='Robux') modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('gamepass_link').setLabel(`Gamepass Link (set price to ${item.robuxAmt||0} Robux)`).setStyle(TextInputStyle.Short).setPlaceholder('https://www.roblox.com/game-pass/...').setRequired(true)));
