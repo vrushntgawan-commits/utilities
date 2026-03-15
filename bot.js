@@ -337,6 +337,7 @@ const slashDefs = [
   new SCB().setName('lootdrop').setDescription('[ADMIN] Drop a mystery loot box (10–50 coins, first to claim wins)').setDefaultMemberPermissions(PFB.Administrator),
   new SCB().setName('add-user').setDescription('Link your Roblox username to your Discord account').addStringOption(o=>o.setName('roblox_username').setDescription('Your Roblox username').setRequired(true)),
   new SCB().setName('check-user').setDescription('See all linked Roblox users').setDefaultMemberPermissions(PFB.Administrator),
+  new SCB().setName('game-night-start').setDescription('[ADMIN] DM all linked users about a game night starting').setDefaultMemberPermissions(PFB.Administrator),
 ].map(c => c.toJSON());
 
 let coinWriteTimer = null;
@@ -1159,6 +1160,31 @@ client.on('interactionCreate', async interaction => {
         pages.push(lines);
       }
       return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x5865F2).setTitle(`🎮 Linked Roblox Users — ${entries.length} total`).setDescription(pages[0]).setFooter({text:`Page 1 of ${pages.length}`})]});
+    }
+
+    if (cmd==='game-night-start') {
+      await interaction.deferReply({flags:MessageFlags.Ephemeral});
+      const data = await dbRead('roblox');
+      const entries = Object.entries(data).filter(([k,v]) => k !== '_init' && v.robloxUsername);
+      if (!entries.length) return interaction.editReply({embeds:[errEmbed('No linked users found!')]});
+
+      let sent = 0, failed = 0;
+      for (const [uid] of entries) {
+        try {
+          const user = await client.users.fetch(uid);
+          await user.send({embeds:[new EmbedBuilder()
+            .setColor(0x9B59B6)
+            .setTitle('🎮 Game Night is Starting!')
+            .setDescription('Hey! A game night is starting **right now**!\n\n> 👤 **Join:** `EventUser52` on Roblox\n\nJoin up and let\'s play! 🎉')
+            .setFooter({text:'See you in-game!'})
+            .setTimestamp()
+          ]});
+          sent++;
+        } catch { failed++; }
+      }
+
+      sendLog(client,{title:'🎮 Game Night Started',color:0x9B59B6,fields:[{name:'Admin',value:`<@${me.id}>`,inline:true},{name:'DMs Sent',value:`${sent}`,inline:true},{name:'Failed',value:`${failed}`,inline:true}]});
+      return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎮 Game Night Started!').setDescription(`DMs sent to **${sent}** linked user(s)!${failed>0?`\n❌ ${failed} user(s) had DMs closed.`:''}`)]});
     }
 
     // ══════════════════════════════════════════
