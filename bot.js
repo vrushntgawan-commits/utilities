@@ -1134,10 +1134,16 @@ client.on('interactionCreate', async interaction => {
       data[me.id] = { discordName: me.username, robloxUsername: robloxUser, linkedAt: Date.now() };
       await dbWrite('roblox', data);
       sendLog(client,{title:'🎮 Roblox Username Linked',color:0x57F287,fields:[{name:'Discord',value:`<@${me.id}>`,inline:true},{name:'Roblox',value:robloxUser,inline:true}]});
-      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎮 Roblox Username Linked!').setDescription(`You've been linked successfully!
-
-**Discord:** ${me.username}
-**Roblox:** \`${robloxUser}\``).setFooter({text:'Use /add-user again to update your username'})],flags:MessageFlags.Ephemeral});
+      // DM with friend request instructions
+      try {
+        await me.send({embeds:[new EmbedBuilder()
+          .setColor(0x5865F2)
+          .setTitle('🎮 One More Step!')
+          .setDescription('To join our game nights, please send a friend request to **EventUser52** on Roblox!\n\n> 👤 **Add:** `EventUser52`\n\nOnce they accept, you\'ll be all set to join game nights! 🎉')
+          .setFooter({text:'This is a one-time setup — you only need to do this once!'})
+        ]});
+      } catch {}
+      return reply({embeds:[new EmbedBuilder().setColor(0x57F287).setTitle('🎮 Roblox Username Linked!').setDescription(`You've been linked successfully!\n\n**Discord:** ${me.username}\n**Roblox:** \`${robloxUser}\`\n\n📬 Check your DMs for next steps!`).setFooter({text:'Use /add-user again to update your username'})],flags:MessageFlags.Ephemeral});
     }
 
     if (cmd==='check-user') {
