@@ -268,7 +268,7 @@ const slashDefs = [
     {name:'125 Robux — 500 coins',value:'robux_125'},{name:'150 Robux — 600 coins',value:'robux_150'},
     {name:'175 Robux — 700 coins',value:'robux_175'},{name:'200 Robux — 800 coins',value:'robux_200'},
     {name:'225 Robux — 900 coins',value:'robux_225'},{name:'250 Robux — 1000 coins',value:'robux_250'},
-    {name:'Celestial ETFB — 100 coins',value:'etfb_cel'},{name:'Divine ETFB — 250 coins',value:'etfb_div'}
+    {name:'Celestial ETFB — 100 coins',value:'etfb_cel'},{name:'Divine ETFB — 250 coins',value:'etfb_div'},{name:'Nitro Method — 1000 coins',value:'nitro'}
   )),
   new SCB().setName('inventory').setDescription('View your unclaimed items'),
   new SCB().setName('claim').setDescription('Submit a delivery claim for an item').addStringOption(o=>o.setName('id').setDescription('Claim ID, e.g. C1').setRequired(true)),
@@ -700,6 +700,26 @@ async function cmdRain(msgOrInteraction, guild, senderId, senderName, amount) {
 // ══════════════════════════════════════════
 client.on('interactionCreate', async interaction => {
   // ── BLACKJACK BUTTON HANDLER ──
+  // ── CHECK-USER PAGINATION ──
+  if (interaction.isButton() && (interaction.customId.startsWith('cu_prev_') || interaction.customId.startsWith('cu_next_'))) {
+    const [,dir, pageStr] = interaction.customId.split('_');
+    const currentPage = parseInt(pageStr);
+    const newPage = dir === 'next' ? currentPage + 1 : currentPage - 1;
+    const data = await dbRead('roblox');
+    const entries = Object.entries(data).filter(([k]) => k !== '_init');
+    const perPage = 15;
+    const pages = [];
+    for (let i = 0; i < entries.length; i += perPage) {
+      pages.push(entries.slice(i, i + perPage).map(([uid, d]) => `<@${uid}> — \`${d.robloxUsername}\``).join('\n'));
+    }
+    const embed = new EmbedBuilder().setColor(0x5865F2).setTitle(`🎮 Linked Roblox Users — ${entries.length} total`).setDescription(pages[newPage]).setFooter({text:`Page ${newPage+1} of ${pages.length}`});
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`cu_prev_${newPage}`).setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(newPage===0),
+      new ButtonBuilder().setCustomId(`cu_next_${newPage}`).setLabel('Next ▶').setStyle(ButtonStyle.Primary).setDisabled(newPage===pages.length-1)
+    );
+    return interaction.update({embeds:[embed], components:[buttons]});
+  }
+
   if (interaction.isButton() && (interaction.customId === 'bj_hit' || interaction.customId === 'bj_stand')) {
     const game = activeBlackjack.get(interaction.user.id);
     if (!game) return interaction.reply({embeds:[errEmbed('No active game found. Start one with `/blackjack`.')],flags:MessageFlags.Ephemeral});
@@ -1169,14 +1189,21 @@ client.on('interactionCreate', async interaction => {
       const data = await dbRead('roblox');
       const entries = Object.entries(data).filter(([k]) => k !== '_init');
       if (!entries.length) return interaction.editReply({embeds:[new EmbedBuilder().setColor(0xFEE75C).setDescription('No users linked yet.')]});
-      const pages = [];
       const perPage = 15;
+      const pages = [];
       for (let i = 0; i < entries.length; i += perPage) {
-        const chunk = entries.slice(i, i + perPage);
-        const lines = chunk.map(([uid, d]) => `<@${uid}> — \`${d.robloxUsername}\``).join('\n');
-        pages.push(lines);
+        pages.push(entries.slice(i, i + perPage).map(([uid, d]) => `<@${uid}> — \`${d.robloxUsername}\``).join('\n'));
       }
-      return interaction.editReply({embeds:[new EmbedBuilder().setColor(0x5865F2).setTitle(`🎮 Linked Roblox Users — ${entries.length} total`).setDescription(pages[0]).setFooter({text:`Page 1 of ${pages.length}`})]});
+      function cuEmbed(page) {
+        return new EmbedBuilder().setColor(0x5865F2).setTitle(`🎮 Linked Roblox Users — ${entries.length} total`).setDescription(pages[page]).setFooter({text:`Page ${page+1} of ${pages.length}`});
+      }
+      function cuButtons(page) {
+        return new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`cu_prev_${page}`).setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(page===0),
+          new ButtonBuilder().setCustomId(`cu_next_${page}`).setLabel('Next ▶').setStyle(ButtonStyle.Primary).setDisabled(page===pages.length-1)
+        );
+      }
+      return interaction.editReply({embeds:[cuEmbed(0)], components: pages.length > 1 ? [cuButtons(0)] : []});
     }
 
     if (cmd==='game-night-start') {
